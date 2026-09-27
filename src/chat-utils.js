@@ -29,7 +29,8 @@ export function isBotMentioned(message, botUsername) {
 export function getPlayerRole(username, botUsername, developerUsername) {
   const normalizedUsername = normalizePlayerName(username);
   if (normalizedUsername === normalizePlayerName(botUsername)) return 'bot';
-  if (normalizedUsername === normalizePlayerName(developerUsername)) return 'developer';
+  const developerUsernames = Array.isArray(developerUsername) ? developerUsername : [developerUsername];
+  if (developerUsernames.some((name) => normalizedUsername === normalizePlayerName(name))) return 'developer';
   return 'player';
 }
 

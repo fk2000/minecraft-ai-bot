@@ -8,7 +8,10 @@ import { formatMicrosoftDeviceCodeNotice } from './auth-utils.js';
 import { isCommandMessage, normalizePlayerName, getPlayerRole, parseSystemChatMessage, isSystemAnnouncement, isBotMentioned, getGeminiErrorSummary, getRequestedAction, parseWorldCommand, calculateShortfall, findInventoryItem, getIdleWanderOffset, chooseRandomAutonomyGoal, findBlockIdsMatchingNames, formatChatResponse } from './chat-utils.js';
 
 const { pathfinder, Movements, goals: { GoalNear } } = pathfinderPlugin;
-const developerUsername = '.fujiwarakaz';
+const developerUsernames = (process.env.DEVELOPER_USERNAMES || '.fujiwarakaz,fujiwarakaz')
+  .split(',')
+  .map((username) => username.trim())
+  .filter(Boolean);
 const activityLogPath = process.env.ACTIVITY_LOG_PATH ?? DEFAULT_ACTIVITY_LOG_PATH;
 const idleWanderAfterMs = readPositiveInteger(process.env.IDLE_WANDER_AFTER_MS, 6000);
 const idleWanderRadius = Math.min(16, readPositiveInteger(process.env.IDLE_WANDER_RADIUS, 6));
@@ -113,7 +116,7 @@ function handlePlayerChat(username, message) {
   const now = Date.now();
   if (lastHandledChat?.key === key && now - lastHandledChat.time < 250) return;
   lastHandledChat = { key, time: now };
-  const role = getPlayerRole(username, bot.username, developerUsername);
+  const role = getPlayerRole(username, bot.username, developerUsernames);
   if (role === 'bot' || isSystemAnnouncement(username, message)) return;
   lastPlayerActivity = now;
   lastAutonomyDeferredReason = undefined;
@@ -218,7 +221,7 @@ function handleCommand(username, message) {
 }
 
 function executeWorldCommand(username, request) {
-  if (getPlayerRole(username, bot.username, developerUsername) !== 'developer') {
+  if (getPlayerRole(username, bot.username, developerUsernames) !== 'developer') {
     recordActivity('world_command.rejected', { actor: username, type: request.type, reason: 'not_developer' });
     bot.chat('天気や難易度の変更は開発者だけが実行できるよ。');
     return;
@@ -256,7 +259,7 @@ function getAutonomyGoals() {
   }];
 
   const nearbyPlayers = Object.entries(bot.players)
-    .filter(([name, player]) => player.entity && getPlayerRole(name, bot.username, developerUsername) !== 'bot')
+    .filter(([name, player]) => player.entity && getPlayerRole(name, bot.username, developerUsernames) !== 'bot')
     .map(([name, player]) => ({ name, entity: player.entity }))
     .filter(({ entity }) => origin.distanceTo(entity.position) <= idleWanderRadius * 2)
     .sort((left, right) => origin.distanceTo(left.entity.position) - origin.distanceTo(right.entity.position));

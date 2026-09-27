@@ -12,6 +12,8 @@ MineflayerとGemini APIを使うMinecraftボットです。クライアントプ
 
 `MC_AUTH=offline`はオフラインモードのサーバー用です。Microsoft認証が必要なサーバーでは`MC_AUTH=microsoft`に設定してください。認証情報やAPIキーを`.env`以外に保存したり、Gitへコミットしたりしないでください。
 
+開発者アカウントは`.env`の`DEVELOPER_USERNAMES`にカンマ区切りで指定します。既定値は`.fujiwarakaz,fujiwarakaz`です。
+
 `MC_AUTH=microsoft`では、初回起動時にターミナルへデバイスログインURLとコードが表示されます。`https://microsoft.com/devicelogin`を開き、表示コードを入力して専用Microsoftアカウントで認証してください。コードは認証用の一時情報なので共有しないでください。別アカウントへ切り替えるときは、`MC_USERNAME`を新しい固有値に変更して認証キャッシュを分けてください。
 
 ViaVersion単体が主に対応するのは新しいクライアントから古いサーバーへの接続です。今回のように古いクライアント（ボットの26.1）から新しいサーバー（26.3）へ接続するにはViaBackwardsも必要です。上記のPaper/Velocity以外のサーバーでは、サーバー基盤に合ったViaVersion系の導入方法を確認してください。ViaBackwardsが変換できない新機能や差異が残ることがあり、ゲーム内動作は実サーバーで確認してください。

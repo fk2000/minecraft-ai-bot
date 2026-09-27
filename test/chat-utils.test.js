@@ -76,6 +76,8 @@ test('player names normalize display prefixes and letter casing', () => {
   assert.equal(normalizePlayerName('FUJIWARAKAZ'), 'fujiwarakaz');
   assert.equal(getPlayerRole('fujiwarakaz', 'FujiwaraKaz', '.fujiwarakaz'), 'bot');
   assert.equal(getPlayerRole('.FujiwaraKaz', 'fujiwarakaz', '.fujiwarakaz'), 'developer');
+  assert.equal(getPlayerRole('.FujiwaraKaz', 'dedicated_minecraft_bot', ['.fujiwarakaz', 'fujiwarakaz']), 'developer');
+  assert.equal(getPlayerRole('FujiwaraKaz', 'dedicated_minecraft_bot', ['.fujiwarakaz', 'fujiwarakaz']), 'developer');
 });
 
 test('Gemini addressing recognizes the bot name and Steve aliases only', () => {
