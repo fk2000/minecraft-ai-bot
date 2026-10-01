@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { writeActivityLog } from '../src/activity-log.js';
 import { MICROSOFT_DEVICE_LOGIN_URL, formatMicrosoftDeviceCodeNotice } from '../src/auth-utils.js';
-import { isCommandMessage, normalizePlayerName, getPlayerRole, isBotMentioned, parseSystemChatMessage, isSystemAnnouncement, getGeminiErrorSummary, getRequestedAction, parseWorldCommand, calculateShortfall, findInventoryItem, getIdleWanderOffset, chooseRandomAutonomyGoal, findBlockIdsMatchingNames, formatChatResponse } from '../src/chat-utils.js';
+import { isCommandMessage, normalizePlayerName, getPlayerRole, isBotMentioned, parseSystemChatMessage, isSystemAnnouncement, getGeminiErrorSummary, getRequestedAction, parseWorldCommand, calculateShortfall, findInventoryItem, getIdleWanderOffset, chooseRandomAutonomyGoal, findBlockIdsMatchingNames, formatChatResponse, canSleepAtMinecraftTime, isOverworldDimension } from '../src/chat-utils.js';
 
 test('commands are detected after leading whitespace', () => {
   assert.equal(isCommandMessage('  !help'), true);
@@ -143,6 +143,16 @@ test('movement, stop, and build commands are routed as actions', () => {
   assert.equal(getRequestedAction('!stop'), 'stop');
   assert.equal(getRequestedAction('家を建てて'), 'build');
   assert.equal(getRequestedAction('!build'), 'build');
+  assert.equal(getRequestedAction('!goals'), 'list_goals');
+  assert.equal(getRequestedAction('目標一覧'), 'list_goals');
+  const setGoalRes = getRequestedAction('!goal mining');
+  assert.equal(typeof setGoalRes, 'object');
+  assert.equal(setGoalRes.type, 'set_goal');
+  assert.equal(setGoalRes.goal.kind, 'mining');
+  assert.equal(getRequestedAction('寝ないで'), 'stay_awake');
+  assert.equal(getRequestedAction('今夜は徹夜だよ'), 'stay_awake');
+  assert.equal(getRequestedAction('寝て'), 'allow_sleep');
+  assert.equal(getRequestedAction('おやすみ'), 'allow_sleep');
   assert.equal(getRequestedAction('こんにちは'), null);
   assert.equal(getRequestedAction('!unknown'), null);
 });
@@ -211,4 +221,22 @@ test('Gemini responses are flattened into one chat line', () => {
 
 test('chat responses are limited to 256 characters', () => {
   assert.equal(formatChatResponse('a'.repeat(300)).length, 256);
+});
+
+test('sleep is allowed at night or during thunderstorms', () => {
+  assert.equal(canSleepAtMinecraftTime({ timeOfDay: 0 }), false);
+  assert.equal(canSleepAtMinecraftTime({ timeOfDay: 6000 }), false);
+  assert.equal(canSleepAtMinecraftTime({ timeOfDay: 12541 }), true);
+  assert.equal(canSleepAtMinecraftTime({ timeOfDay: 18000 }), true);
+  assert.equal(canSleepAtMinecraftTime({ timeOfDay: 23458 }), true);
+  assert.equal(canSleepAtMinecraftTime({ timeOfDay: 23459 }), false);
+  assert.equal(canSleepAtMinecraftTime({ timeOfDay: 0, isRaining: true, thunderState: 1 }), true);
+  assert.equal(canSleepAtMinecraftTime({ timeOfDay: 0, isRaining: true, thunderState: 0 }), false);
+});
+
+test('beds can only be used in the overworld', () => {
+  assert.equal(isOverworldDimension('minecraft:overworld'), true);
+  assert.equal(isOverworldDimension('overworld'), true);
+  assert.equal(isOverworldDimension('minecraft:the_nether'), false);
+  assert.equal(isOverworldDimension('minecraft:the_end'), false);
 });

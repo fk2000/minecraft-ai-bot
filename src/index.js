@@ -5,7 +5,9 @@ import pathfinderPlugin from 'mineflayer-pathfinder';
 import chatMessageFactory from 'prismarine-chat';
 import { DEFAULT_ACTIVITY_LOG_PATH, writeActivityLog } from './activity-log.js';
 import { formatMicrosoftDeviceCodeNotice } from './auth-utils.js';
-import { isCommandMessage, normalizePlayerName, getPlayerRole, parseSystemChatMessage, isSystemAnnouncement, isBotMentioned, getGeminiErrorSummary, getRequestedAction, parseWorldCommand, calculateShortfall, findInventoryItem, getIdleWanderOffset, chooseRandomAutonomyGoal, findBlockIdsMatchingNames, formatChatResponse } from './chat-utils.js';
+import { isCommandMessage, normalizePlayerName, getPlayerRole, parseSystemChatMessage, isSystemAnnouncement, isBotMentioned, getGeminiErrorSummary, getRequestedAction, parseWorldCommand, calculateShortfall, findInventoryItem, getIdleWanderOffset, chooseRandomAutonomyGoal, findBlockIdsMatchingNames, formatChatResponse, canSleepAtMinecraftTime, isOverworldDimension } from './chat-utils.js';
+import { buildAvailableGoals, selectSmartAutonomyGoal, checkSurvivalNeeds, GOAL_DESCRIPTIONS, GOAL_TYPES } from './goal-system.js';
+import { executeGoalAction } from './goal-actions.js';
 
 const { pathfinder, Movements, goals: { GoalNear } } = pathfinderPlugin;
 const developerUsernames = (process.env.DEVELOPER_USERNAMES || '.fujiwarakaz,fujiwarakaz')
@@ -18,6 +20,7 @@ const idleWanderRadius = Math.min(16, readPositiveInteger(process.env.IDLE_WANDE
 const autonomyIntervalMs = readPositiveInteger(process.env.AUTONOMY_INTERVAL_MS, 30 * 60 * 1000);
 const autonomyActionIntervalMs = readPositiveInteger(process.env.AUTONOMY_ACTION_INTERVAL_MS, 6000);
 const idleWanderAvoidNames = (process.env.IDLE_WANDER_AVOID_BLOCKS ?? 'chair,seat').split(',');
+const bedSearchDistance = Math.min(128, readPositiveInteger(process.env.BED_SEARCH_DISTANCE, 64));
 
 function recordActivity(event, details = {}) {
   void writeActivityLog(activityLogPath, event, details);
@@ -60,6 +63,11 @@ let lastAutonomyDeferredReason;
 let nextAutonomyGoalAt = 0;
 let nextAutonomyActionAt = 0;
 let shuttingDown = false;
+let nightSleepActive = false;
+let nightSleepEnabled = true;
+let nightSleepGeneration = 0;
+let nextNightSleepAttemptAt = 0;
+let playerDirectedMovement = false;
 
 function clearRuntimeTimers() {
   if (idleJumpTimer) clearInterval(idleJumpTimer);
@@ -95,7 +103,7 @@ bot.once('spawn', () => {
   console.log('普通のチャットで話しかけてね。コマンド一覧は !help で確認できます。');
   bot.chat('普通のチャットにそのまま話しかけてね。手に持つアイテムは !hold [名前]、一覧は !help で確認できるよ。');
   idleJumpTimer = setInterval(() => {
-    if (bot._client.ended || bot.vehicle || !bot.entity?.onGround || bot.pathfinder.isMoving() || activeBuild || autonomyActive) return;
+    if (bot._client.ended || bot.vehicle || bot.isSleeping || nightSleepActive || !bot.entity?.onGround || bot.pathfinder.isMoving() || activeBuild || autonomyActive) return;
 
     bot.setControlState('jump', true);
     recordActivity('idle_jump');
@@ -185,6 +193,14 @@ bot.on('message', (jsonMessage, position, sender) => {
 });
 
 bot.on('chat', (username, message) => handlePlayerChat(username, message));
+bot.on('sleep', () => {
+  recordActivity('night_sleep.asleep');
+  console.info('[sleep] Sleeping in bed');
+});
+bot.on('wake', () => {
+  recordActivity('night_sleep.woke');
+  if (!canBotSleepNow()) bot.chat('おはよう！朝になったよ。');
+});
 
 bot.on('messagestr', (message, position) => {
   if (position !== 'system') return;
@@ -208,7 +224,7 @@ function handleCommand(username, message) {
   }
 
   if (command === '!help') {
-    bot.chat('使えるコマンドは !help、!ping、!come、!stop、!build、!hold [名前]、!weather、!difficulty だよ。');
+    bot.chat('使えるコマンド: !help, !ping, !come, !stop, !build, !goals, !goal [名前/一連], !hold, !weather, !difficulty');
   } else if (command === '!ping') {
     bot.chat('pong');
   } else if (command === '!hold') {
@@ -253,10 +269,11 @@ function cancelAutonomyGoal() {
 
 function getAutonomyGoals() {
   const origin = bot.entity.position.floored();
-  const goals = [{
+  const goals = buildAvailableGoals(bot, idleWanderRadius);
+  goals.push({
     kind: 'explore',
     description: '近くを探検'
-  }];
+  });
 
   const nearbyPlayers = Object.entries(bot.players)
     .filter(([name, player]) => player.entity && getPlayerRole(name, bot.username, developerUsernames) !== 'bot')
@@ -301,10 +318,100 @@ function getAutonomyGoals() {
   return goals;
 }
 
+function canBotSleepNow() {
+  return isOverworldDimension(bot.game?.dimension) && canSleepAtMinecraftTime({
+    timeOfDay: bot.time?.timeOfDay,
+    isRaining: bot.isRaining,
+    thunderState: bot.thunderState
+  });
+}
+
+function cancelNightSleep(reason) {
+  if (!nightSleepActive && !bot.isSleeping) return;
+  nightSleepGeneration += 1;
+  nightSleepActive = false;
+  bot.pathfinder.setGoal(null);
+  recordActivity('night_sleep.cancelled', { reason });
+}
+
+function tryHandleNightSleep(now) {
+  if (!nightSleepEnabled) {
+    if (nightSleepActive) cancelNightSleep('sleep_disabled');
+    if (bot.isSleeping) void wakeFromBed();
+    return false;
+  }
+
+  if (bot.isSleeping) {
+    if (!canBotSleepNow()) void wakeFromBed();
+    return true;
+  }
+
+  if (!canBotSleepNow()) {
+    if (nightSleepActive) cancelNightSleep('daytime');
+    return false;
+  }
+
+  if (activeBuild || playerDirectedMovement) return true;
+  if (!nightSleepActive && now >= nextNightSleepAttemptAt) void goToNearestBedAndSleep();
+  return true;
+}
+
+async function wakeFromBed() {
+  if (!bot.isSleeping) return;
+  try {
+    await bot.wake();
+  } catch (error) {
+    if (error.message !== 'already awake') {
+      recordActivity('night_sleep.wake_failed', { reason: error.message });
+      console.warn('[sleep] Could not wake:', error.message);
+    }
+  }
+}
+
+async function goToNearestBedAndSleep() {
+  const generation = ++nightSleepGeneration;
+  nightSleepActive = true;
+  if (autonomyActive) cancelAutonomyGoal();
+
+  const bed = bot.findBlock({
+    matching: (block) => Boolean(block && bot.isABed(block)),
+    maxDistance: bedSearchDistance
+  });
+
+  if (!bed) {
+    recordActivity('night_sleep.skipped', { reason: 'no_bed' });
+    nextNightSleepAttemptAt = Date.now() + 10_000;
+    if (generation === nightSleepGeneration) nightSleepActive = false;
+    return;
+  }
+
+  recordActivity('night_sleep.started', {
+    x: bed.position.x,
+    y: bed.position.y,
+    z: bed.position.z
+  });
+
+  try {
+    await bot.pathfinder.goto(new GoalNear(bed.position.x, bed.position.y, bed.position.z, 1));
+    if (generation !== nightSleepGeneration) return;
+    const currentBed = bot.blockAt(bed.position);
+    if (!currentBed || !bot.isABed(currentBed)) throw new Error('bed_missing');
+    await bot.sleep(currentBed);
+  } catch (error) {
+    if (generation !== nightSleepGeneration) return;
+    nextNightSleepAttemptAt = Date.now() + 5000;
+    recordActivity('night_sleep.failed', { reason: error.message });
+    console.warn('[sleep] Could not sleep:', error.message);
+  } finally {
+    if (generation === nightSleepGeneration) nightSleepActive = false;
+  }
+}
+
 function runAutonomyCycle() {
   if (bot._client.ended || !bot.entity?.position) return;
 
   const now = Date.now();
+  if (tryHandleNightSleep(now)) return;
   if (now >= nextAutonomyGoalAt) {
     if (autonomyActive) cancelAutonomyGoal();
     currentAutonomyGoal = chooseRandomAutonomyGoal(getAutonomyGoals());
@@ -343,9 +450,44 @@ function runAutonomyCycle() {
 }
 
 async function performAutonomyAction(objective) {
+  const origin = bot.entity.position.floored();
+
+  // 新目標タイプまたは装備固めパイプラインの処理
+  const customGoalTypes = new Set([
+    'pipeline', 'equipment_pipeline',
+    GOAL_TYPES.EQUIPMENT, GOAL_TYPES.MINING, GOAL_TYPES.CRAFTING,
+    GOAL_TYPES.PATROL, GOAL_TYPES.SURVIVAL, GOAL_TYPES.TERRAIN_SURVEY,
+    GOAL_TYPES.VILLAGE_ANALYSIS, GOAL_TYPES.NETHER_EXPLORATION, GOAL_TYPES.END_EXPLORATION,
+    GOAL_TYPES.ANCIENT_CITY, GOAL_TYPES.SNOWY_MOUNTAIN, GOAL_TYPES.WOOD_CUTTING,
+    GOAL_TYPES.CHEST_SORTING, GOAL_TYPES.FARMING, GOAL_TYPES.COOKING, GOAL_TYPES.INVENTORY_SORTING
+  ]);
+
+  if (customGoalTypes.has(objective.kind)) {
+    const generation = ++autonomyGeneration;
+    autonomyActive = true;
+    recordActivity('autonomy_action.started', { goal: objective.kind });
+    try {
+      const result = await executeGoalAction(objective, bot, GoalNear);
+      if (generation !== autonomyGeneration) return;
+      autonomyGoalComplete = true;
+      recordActivity('autonomy_goal.completed', { goal: objective.kind, message: result.message });
+      if (result.message) {
+        console.info(`[autonomy] ${result.message}`);
+      }
+    } catch (error) {
+      if (generation === autonomyGeneration) {
+        autonomyGoalComplete = true;
+        recordActivity('autonomy_action.failed', { goal: objective.kind, reason: error.message });
+        console.warn('[autonomy] Goal action failed:', error.message);
+      }
+    } finally {
+      if (generation === autonomyGeneration) autonomyActive = false;
+    }
+    return;
+  }
+
   let goal;
   let targetBlock;
-  const origin = bot.entity.position.floored();
 
   if (objective.kind === 'explore') {
     const offset = getIdleWanderOffset(idleWanderRadius);
@@ -454,14 +596,46 @@ async function holdItem(username, query) {
 }
 
 function dispatchAction(username, action) {
-  recordActivity('action.requested', { actor: username, action });
-  console.info(`[action] ${username}: ${action}`);
+  recordActivity('action.requested', { actor: username, action: typeof action === 'object' ? action.type : action });
+  console.info(`[action] ${username}:`, action);
+
+  if (action === 'list_goals') {
+    const availableGoalList = Object.entries(GOAL_DESCRIPTIONS).map(([k, d]) => `${k}:${d.split('（')[0]}`).join(', ');
+    bot.chat(`【設定可能な目標】一連(採掘・クラフト・装備), ${availableGoalList}`);
+    return;
+  }
+
+  if (typeof action === 'object' && action.type === 'set_goal') {
+    const targetGoal = action.goal;
+    currentAutonomyGoal = targetGoal;
+    autonomyGoalComplete = false;
+    bot.chat(`了解！新しい目標「${targetGoal.description}」を開始するよ！`);
+    if (bot.isSleeping) void bot.wake().catch(() => {});
+    void performAutonomyAction(targetGoal);
+    return;
+  }
+
   if (action === 'come') {
+    cancelNightSleep('player_command');
+    if (bot.isSleeping) void bot.wake().catch(() => {});
     void moveToPlayer(username);
   } else if (action === 'stop') {
     stopCurrentWork();
   } else if (action === 'build') {
+    cancelNightSleep('player_command');
+    if (bot.isSleeping) void bot.wake().catch(() => {});
     void buildHut();
+  } else if (action === 'stay_awake') {
+    nightSleepEnabled = false;
+    cancelNightSleep('player_stay_awake');
+    if (bot.isSleeping) void bot.wake().catch(() => {});
+    recordActivity('night_sleep.disabled', { actor: username });
+    bot.chat('了解、今夜は寝ないよ。');
+  } else if (action === 'allow_sleep') {
+    nightSleepEnabled = true;
+    nextNightSleepAttemptAt = 0;
+    recordActivity('night_sleep.enabled', { actor: username });
+    bot.chat('了解、夜になったら寝るよ。');
   }
 }
 
@@ -483,6 +657,7 @@ async function moveToPlayer(username) {
   }
 
   const generation = ++movementGeneration;
+  playerDirectedMovement = true;
   const botPosition = bot.entity.position.floored();
   const targetPosition = target.position.floored();
   recordActivity('movement.started', {
@@ -504,12 +679,18 @@ async function moveToPlayer(username) {
       console.error('Pathfinding failed:', error);
       bot.chat('道が見つからなくて、そこまで行けなかったよ。');
     }
+  } finally {
+    if (generation === movementGeneration) playerDirectedMovement = false;
   }
 }
 
 function stopCurrentWork() {
   recordActivity('work.stopped');
   movementGeneration += 1;
+  playerDirectedMovement = false;
+  nextNightSleepAttemptAt = Date.now() + idleWanderAfterMs;
+  cancelNightSleep('player_stop');
+  if (bot.isSleeping) void bot.wake().catch(() => {});
   bot.pathfinder.setGoal(null);
   bot.stopDigging();
   bot.stopUsingItem();

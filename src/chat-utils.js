@@ -1,3 +1,5 @@
+import { parseGoalCommand } from './goal-system.js';
+
 export function isCommandMessage(message) {
   return message.trimStart().startsWith('!');
 }
@@ -70,13 +72,25 @@ export function getRequestedAction(message) {
   const commandActions = {
     '!come': 'come',
     '!stop': 'stop',
-    '!build': 'build'
+    '!build': 'build',
+    '!goals': 'list_goals',
+    '!goal': 'set_goal'
   };
 
-  if (commandActions[command]) return commandActions[command];
+  if (normalized === '!goals' || normalized === '目標一覧' || normalized === '目標リスト') return 'list_goals';
+  if (commandActions[command] && command !== '!goal') return commandActions[command];
+
+  // 目標設定のコマンドまたは自然言語指定
+  const parsedGoal = parseGoalCommand(message);
+  if (parsedGoal) {
+    return { type: 'set_goal', goal: parsedGoal };
+  }
+
   if (normalized.includes('とまれ') || normalized.includes('止まれ')) return 'stop';
   if (/家(?:を)?建てて/.test(normalized)) return 'build';
   if (/(?:ここ|こっち)(?:に)?(?:来て|きて)/.test(normalized) || normalized.includes('ここに集合して')) return 'come';
+  if (normalized.includes('寝ないで') || normalized.includes('徹夜')) return 'stay_awake';
+  if (normalized.includes('おやすみ') || normalized.includes('寝て')) return 'allow_sleep';
   return null;
 }
 
@@ -162,4 +176,15 @@ export function formatChatResponse(response) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 256);
+}
+
+export function canSleepAtMinecraftTime({ timeOfDay = 0, isRaining = false, thunderState = 0 } = {}) {
+  const thunderstorm = Boolean(isRaining) && Number(thunderState) > 0;
+  if (thunderstorm) return true;
+  return timeOfDay >= 12541 && timeOfDay <= 23458;
+}
+
+export function isOverworldDimension(dimension) {
+  const normalized = String(dimension ?? '').toLowerCase();
+  return normalized === 'minecraft:overworld' || normalized === 'overworld' || normalized === '0';
 }
