@@ -10,6 +10,7 @@ import {
   type JevAutonomyChoice,
   type JevPlayerEvaluation
 } from '../jev/evaluator.js';
+import { parseDifficultyCommand } from './world-command.js';
 
 type ChatSource = 'minecraft' | 'discord';
 
@@ -41,6 +42,10 @@ const rulesText = process.env.SERVER_RULES_TEXT?.trim() ||
   'ルール: 荒らし禁止・他プレイヤーへの迷惑行為禁止です。';
 const commandHelpText = process.env.COMMAND_HELP_TEXT?.trim() ||
   '使えるコマンド: !help, !ping, !come, !stop, !build, !goals, !goal, !hold, !weather, !difficulty';
+const developerUsernames = (process.env.DEVELOPER_USERNAMES ?? '.fujiwarakaz,fujiwarakaz')
+  .split(',')
+  .map((username) => username.trim().toLowerCase())
+  .filter(Boolean);
 const pingMinecraftServer = minecraftProtocol.ping;
 const toxicityThreshold = 0.7;
 const { pathfinder, goals: { GoalNear } } = pathfinderPlugin;
@@ -202,6 +207,36 @@ async function relay(input: ChatInput): Promise<void> {
   lastPlayerActivityAt = Date.now();
   const requestActivityAt = lastPlayerActivityAt;
   cancelAutonomyMovement();
+
+  const difficultyCommand = input.source === 'minecraft'
+    ? parseDifficultyCommand(content)
+    : null;
+  if (difficultyCommand) {
+    if (!developerUsernames.includes(input.username.trim().toLowerCase())) {
+      await input.reply('難易度の変更は開発者だけが実行できるよ。');
+      return;
+    }
+    if (!difficultyCommand.value) {
+      await input.reply('使い方: !difficulty peaceful|easy|normal|hard');
+      return;
+    }
+
+    const bot = minecraftBot;
+    if (!bot || bot._client.ended) {
+      await input.reply('Minecraftサーバーに接続していないので、難易度を変更できないよ。');
+      return;
+    }
+
+    bot.chat(`/difficulty ${difficultyCommand.value}`);
+    console.info(JSON.stringify({
+      event: 'world_command.sent',
+      actor: input.username,
+      type: 'difficulty',
+      value: difficultyCommand.value
+    }));
+    await input.reply(`難易度を${difficultyCommand.value}に変更するコマンドを送ったよ。`);
+    return;
+  }
 
   const connectedBot = minecraftBot && !minecraftBot._client.ended ? minecraftBot : undefined;
   const gameContext = connectedBot?.entity?.position ? getAutonomyContext(connectedBot) : undefined;
