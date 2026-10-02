@@ -14,7 +14,8 @@ import { JevDailyQuota, type JevQuotaReservation } from '../jev/daily-quota.js';
 import {
   canSleepInMinecraftContext,
   chooseMineflayerAutonomyChoice,
-  formatPlayerJoinGreeting
+  formatPlayerJoinGreeting,
+  isComeHereCommand
 } from './behavior.js';
 import { parseJevCommand } from './jev-command.js';
 import { parseDifficultyCommand } from './world-command.js';
@@ -272,6 +273,41 @@ async function relay(input: ChatInput): Promise<void> {
     await forward();
   } catch (error) {
     console.error(`[relay] Failed to forward ${input.source} message from ${input.username}:`, error);
+  }
+
+  if (input.source === 'minecraft' && isComeHereCommand(content)) {
+    const bot = minecraftBot;
+    const target = bot?.players[input.username]?.entity;
+    if (!bot || bot._client.ended || !target) {
+      await input.reply('今はあなたの場所が確認できないので、近くでもう一度呼んでね。');
+      return;
+    }
+    if (autonomyRunning) {
+      await input.reply('いま別の行動を進めているよ。終わったらまたお願いね。');
+      return;
+    }
+
+    autonomyRunning = true;
+    try {
+      await input.reply(`${input.username}のところへ行くね。`);
+      await bot.pathfinder.goto(new GoalNear(
+        target.position.x,
+        target.position.y,
+        target.position.z,
+        2
+      ));
+      if (minecraftBot === bot && !bot._client.ended) {
+        await input.reply(`${input.username}のところに着いたよ。`);
+      }
+    } catch (error) {
+      console.error(`[action] Direct come-here request from ${input.username} failed:`, error);
+      if (minecraftBot === bot && !bot._client.ended) {
+        await input.reply('そこまで行けなかったよ。道を確認して、もう一度呼んでね。');
+      }
+    } finally {
+      autonomyRunning = false;
+    }
+    return;
   }
 
   if (!jevCommand) {

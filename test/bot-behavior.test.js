@@ -4,8 +4,18 @@ import {
   canSleepInMinecraftContext,
   chooseMineflayerAutonomyChoice,
   formatPlayerJoinGreeting,
+  isComeHereCommand,
   shouldRoutePlayerChoice
 } from '../dist/bot/behavior.js';
+
+test('simple Minecraft come-here requests are recognized without Jev', () => {
+  assert.equal(isComeHereCommand('ここに来て'), true);
+  assert.equal(isComeHereCommand('ここにきて！'), true);
+  assert.equal(isComeHereCommand('こっち来てください'), true);
+  assert.equal(isComeHereCommand('!come'), true);
+  assert.equal(isComeHereCommand('もしここに来てくれたら'), false);
+  assert.equal(isComeHereCommand('こんにちは'), false);
+});
 
 test('player join greetings welcome each player except the bot itself', () => {
   assert.equal(

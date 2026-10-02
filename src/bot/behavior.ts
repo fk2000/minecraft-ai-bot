@@ -37,6 +37,12 @@ export function formatPlayerJoinGreeting(username: string, botUsername: string):
   return `こんにちは、${normalizedUsername}さん！ログインありがとう！`;
 }
 
+export function isComeHereCommand(message: string): boolean {
+  const normalized = message.trim().replace(/[。.!！?？]+$/g, '').trim().toLowerCase();
+  return normalized === '!come' ||
+    /^(?:ねえ[、, ]*)?(?:ここ(?:に)?|こっち(?:に)?)(?:来て|きて|集合して)(?:ね|ください)?$/.test(normalized);
+}
+
 export function chooseMineflayerAutonomyChoice(
   allowedChoices: readonly JevAutonomyChoice[],
   recentChoices: readonly JevAutonomyChoice[]
