@@ -3,6 +3,7 @@ WORKDIR /app
 COPY package*.json tsconfig.node.json ./
 RUN npm ci
 COPY src/bot/app.ts src/bot/
+COPY src/bot/world-command.ts src/bot/
 COPY src/jev ./src/jev
 RUN npm run build:container
 
