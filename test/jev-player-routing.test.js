@@ -25,7 +25,23 @@ test('player routing only exposes safe actions currently allowed by game state',
     'rest'
   ]);
   assert.equal(JSON.parse(request.state).playerMessage, 'Bot, explore nearby');
+  assert.match(request.questions.intent.criteria.explore, /short, safe distance/i);
   assert.throws(() => buildPlayerRequest('dig for diamonds', gameState, ['mining']), RangeError);
+});
+
+test('socialize routes explicit come-here requests toward the requesting player', () => {
+  const request = buildPlayerRequest(
+    'ここに来て',
+    JSON.stringify({
+      ...JSON.parse(gameState),
+      requestedPlayer: { distance: 24 },
+      allowedActions: ['socialize', 'observe', 'rest']
+    }),
+    ['socialize', 'observe', 'rest']
+  );
+
+  assert.match(request.questions.intent.criteria.socialize, /come here/i);
+  assert.deepEqual(JSON.parse(request.state).gameState.requestedPlayer, { distance: 24 });
 });
 
 test('player routing parses Jev action, toxicity, confidence, and uncertainty results', async () => {

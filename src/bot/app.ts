@@ -247,7 +247,9 @@ async function relay(input: ChatInput): Promise<void> {
   }
 
   const connectedBot = minecraftBot && !minecraftBot._client.ended ? minecraftBot : undefined;
-  const gameContext = connectedBot?.entity?.position ? getAutonomyContext(connectedBot) : undefined;
+  const gameContext = connectedBot?.entity?.position
+    ? getAutonomyContext(connectedBot, input.source === 'minecraft' ? input.username : undefined)
+    : undefined;
   const allowedActions = gameContext?.allowedChoices ?? [];
 
   let evaluation: JevPlayerEvaluation;
@@ -319,14 +321,25 @@ async function relay(input: ChatInput): Promise<void> {
     autonomyRunning = true;
     let actionReply: string;
     try {
-      const currentContext = getAutonomyContext(bot);
+      const currentContext = getAutonomyContext(
+        bot,
+        input.source === 'minecraft' ? input.username : undefined
+      );
       if (!currentContext.allowedChoices.includes(evaluation.choice)) {
         actionReply = '周囲の状況が変わったので、今回は行動しないね。';
       } else {
-        await performAutonomyChoice(bot, evaluation.choice, currentContext, true);
+        await performAutonomyChoice(
+          bot,
+          evaluation.choice,
+          currentContext,
+          true,
+          input.source === 'minecraft' ? input.username : undefined
+        );
         const actionReplies: Record<JevAutonomyChoice, string> = {
           survive: '危険から離れるね。',
-          socialize: '近くのプレイヤーや動物のところへ行くね。',
+          socialize: input.source === 'minecraft'
+            ? `${input.username}のところへ行くね。`
+            : '近くのプレイヤーや動物のところへ行くね。',
           explore: '周りを少し探索してくるね。',
           observe: 'その場で周りの様子を確認するね。',
           rest: '了解、その場で待っているね。'
@@ -505,20 +518,25 @@ function scheduleAutonomy(bot: Bot, delayMs = autonomyIntervalMs): void {
   autonomyTimer.unref();
 }
 
-function getAutonomyContext(bot: Bot): {
+function getAutonomyContext(bot: Bot, requestedPlayerName?: string): {
   state: string;
   allowedChoices: JevAutonomyChoice[];
   nearbyPlayers: Array<{ name: string; distance: number }>;
+  requestedPlayer: { name: string; distance: number } | undefined;
   nearbyAnimals: Array<{ id: number; name: string; distance: number }>;
   nearbyHostiles: Array<{ id: number; name: string; distance: number; x: number; z: number }>;
 } {
   const position = bot.entity.position;
-  const nearbyPlayers = Object.entries(bot.players)
+  const trackedPlayers = Object.entries(bot.players)
     .filter(([name, player]) => name !== bot.username && player.entity)
     .map(([name, player]) => ({
       name,
       distance: position.distanceTo(player.entity!.position)
-    }))
+    }));
+  const requestedPlayer = requestedPlayerName
+    ? trackedPlayers.find(({ name }) => name.toLowerCase() === requestedPlayerName.toLowerCase())
+    : undefined;
+  const nearbyPlayers = trackedPlayers
     .filter((player) => player.distance <= 16)
     .sort((left, right) => left.distance - right.distance);
   const nearbyAnimals = Object.values(bot.entities)
@@ -547,7 +565,7 @@ function getAutonomyContext(bot: Bot): {
   const allowedChoices: JevAutonomyChoice[] = needsCaution
     ? ['observe', 'rest']
     : ['explore', 'observe', 'rest'];
-  if (!criticallyLow && (nearbyPlayers.length > 0 || nearbyAnimals.length > 0)) {
+  if (!criticallyLow && (nearbyPlayers.length > 0 || nearbyAnimals.length > 0 || requestedPlayer)) {
     allowedChoices.push('socialize');
   }
   if (nearbyHostiles.length > 0) allowedChoices.push('survive');
@@ -558,6 +576,9 @@ function getAutonomyContext(bot: Bot): {
     food: bot.food,
     dimension: bot.game.dimension,
     nearbyPlayers: nearbyPlayers.map(({ distance }) => ({ distance: Math.round(distance) })),
+    requestedPlayer: requestedPlayer
+      ? { distance: Math.round(requestedPlayer.distance) }
+      : undefined,
     nearbyFriendlyAnimals: nearbyAnimals.map(({ name, distance }) => ({
       name,
       distance: Math.round(distance)
@@ -570,7 +591,7 @@ function getAutonomyContext(bot: Bot): {
     allowedActions: allowedChoices
   });
 
-  return { state, allowedChoices, nearbyPlayers, nearbyAnimals, nearbyHostiles };
+  return { state, allowedChoices, nearbyPlayers, requestedPlayer, nearbyAnimals, nearbyHostiles };
 }
 
 async function moveAutonomously(
@@ -591,7 +612,8 @@ async function performAutonomyChoice(
   bot: Bot,
   choice: JevAutonomyChoice,
   context: ReturnType<typeof getAutonomyContext>,
-  allowWhilePlayerActive = false
+  allowWhilePlayerActive = false,
+  requestedPlayerName?: string
 ): Promise<void> {
   if (choice === 'survive') {
     const hostile = context.nearbyHostiles[0];
@@ -611,7 +633,9 @@ async function performAutonomyChoice(
   }
 
   if (choice === 'socialize') {
-    const player = context.nearbyPlayers[0];
+    const player = (requestedPlayerName
+      ? context.requestedPlayer
+      : undefined) ?? context.nearbyPlayers[0];
     if (player) {
       const target = bot.players[player.name]?.entity;
       if (target) await moveAutonomously(

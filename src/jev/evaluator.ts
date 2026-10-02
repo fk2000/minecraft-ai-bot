@@ -126,7 +126,7 @@ export function buildSystemOneRequest(message: string): JevSystemOneRequest {
 
 const choiceCriteria: Record<JevAutonomyChoice, JevContent> = {
   survive: 'Move away from nearby hostile mobs or other immediate danger. Never attack, dig, place, or interact with blocks.',
-  socialize: 'Approach a nearby player or friendly animal without attacking or interacting with blocks.',
+  socialize: 'Approach the player who issued a clear request such as "come here" (prioritize that player when identified in the game state), otherwise approach a nearby player or friendly animal. Do not attack or interact with blocks.',
   explore: 'Walk a short, safe distance through the current area without breaking or placing blocks.',
   observe: 'Stay in place and inspect the current surroundings without changing the world.',
   rest: 'Do not move; defer action because there is no clearly useful safe task.'
