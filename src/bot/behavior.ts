@@ -29,6 +29,14 @@ export function shouldRoutePlayerChoice(choice: JevPlayerChoice, isMentioned: bo
   return isMentioned || JEV_PLAYER_ACTION_CHOICES.some((action) => action === choice);
 }
 
+export function formatPlayerJoinGreeting(username: string, botUsername: string): string | undefined {
+  const normalizedUsername = username.trim();
+  if (!normalizedUsername || normalizedUsername.toLowerCase() === botUsername.toLowerCase()) {
+    return undefined;
+  }
+  return `こんにちは、${normalizedUsername}さん！ログインありがとう！`;
+}
+
 export function chooseMineflayerAutonomyChoice(
   allowedChoices: readonly JevAutonomyChoice[],
   recentChoices: readonly JevAutonomyChoice[]

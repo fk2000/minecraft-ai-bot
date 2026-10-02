@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { GoogleGenAI } from '@google/genai';
 import { Client, Events, GatewayIntentBits, type Message } from 'discord.js';
 import minecraftProtocol from 'minecraft-protocol';
-import mineflayer, { type Bot } from 'mineflayer';
+import mineflayer, { type Bot, type Player } from 'mineflayer';
 import pathfinderPlugin, { Movements, goals } from 'mineflayer-pathfinder';
 import {
   evaluatePlayerRequest,
@@ -13,7 +13,8 @@ import {
 import { JevDailyQuota, type JevQuotaReservation } from '../jev/daily-quota.js';
 import {
   canSleepInMinecraftContext,
-  chooseMineflayerAutonomyChoice
+  chooseMineflayerAutonomyChoice,
+  formatPlayerJoinGreeting
 } from './behavior.js';
 import { parseJevCommand } from './jev-command.js';
 import { parseDifficultyCommand } from './world-command.js';
@@ -808,6 +809,7 @@ function disconnectMineflayerBot(bot: Bot, reason: unknown, event: 'kicked' | 'e
   connectionStableTimer = undefined;
 
   bot.removeListener('spawn', onSpawn);
+  bot.removeListener('playerJoined', onPlayerJoined);
   bot.removeListener('chat', onChat);
   bot.removeListener('kicked', onKicked);
   bot.removeListener('end', onEnd);
@@ -825,6 +827,7 @@ function disconnectMineflayerBot(bot: Bot, reason: unknown, event: 'kicked' | 'e
 let activeMinecraftListeners: {
   bot: Bot;
   onSpawn: () => void;
+  onPlayerJoined: (player: Player) => void;
   onChat: (username: string, content: string) => void;
   onKicked: (reason: string, loggedIn: boolean) => void;
   onEnd: (reason: string) => void;
@@ -870,6 +873,13 @@ function onChat(username: string, content: string): void {
   });
 }
 
+function onPlayerJoined(player: Player): void {
+  const bot = activeMinecraftListeners?.bot;
+  if (!bot || minecraftBot !== bot || bot._client.ended) return;
+  const greeting = formatPlayerJoinGreeting(player.username, bot.username);
+  if (greeting) bot.chat(formatMinecraftText(greeting));
+}
+
 function onKicked(reason: string, loggedIn: boolean): void {
   const bot = activeMinecraftListeners?.bot;
   if (bot) disconnectMineflayerBot(bot, `${describeReason(reason)} (loggedIn=${loggedIn})`, 'kicked');
@@ -910,8 +920,9 @@ function createMinecraftBot(): void {
   isConnecting = false;
   minecraftBot = bot;
   bot.loadPlugin(pathfinder);
-  activeMinecraftListeners = { bot, onSpawn, onChat, onKicked, onEnd, onError };
+  activeMinecraftListeners = { bot, onSpawn, onPlayerJoined, onChat, onKicked, onEnd, onError };
   bot.on('spawn', onSpawn);
+  bot.on('playerJoined', onPlayerJoined);
   bot.on('chat', onChat);
   bot.on('kicked', onKicked);
   bot.on('end', onEnd);
@@ -968,6 +979,7 @@ function shutdown(signal: NodeJS.Signals): void {
     const listeners = activeMinecraftListeners;
     if (listeners?.bot === bot) {
       bot.removeListener('spawn', listeners.onSpawn);
+      bot.removeListener('playerJoined', listeners.onPlayerJoined);
       bot.removeListener('chat', listeners.onChat);
       bot.removeListener('kicked', listeners.onKicked);
       bot.removeListener('end', listeners.onEnd);

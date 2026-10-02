@@ -75,6 +75,7 @@ Cloudflare Workerは30分間隔の監視用途で、MineflayerやDiscord Gateway
 - `JEV_API_KEY`
 - Jevによる明示的な指示判定は、MinecraftまたはDiscordで`Jev: ここに来て`のように入力した場合だけ行います。`JEV_DAILY_LIMIT`（既定3回/UTC日）を上限に、枠は`Jev:`指示だけで消費します。通常会話と自律行動ではJevを呼び出しません。上限到達後の`Jev:`指示は翌日のUTC 0時まで保留します。再試行は無効で、1枠につきAPIリクエストは最大1回です。
 - 自律行動はMineflayer内の安全なローカルルールで選択し、`AUTONOMY_INTERVAL_MS`（既定6秒）ごとにゲーム状況を確認します。プレイヤー操作直後や行動中は次の計画を待ちます。自律行動はJevの1日上限に影響されません。
+- Minecraftにプレイヤーがログインすると、Bot自身を除く参加者へチャットで挨拶します。
 - Botはオーバーワールドで夜間または雷雨になると、近くのベッドを探して自動で就寝します。`NIGHT_SLEEP_CHECK_INTERVAL_MS`（既定5秒）と`BED_SEARCH_DISTANCE`（既定64ブロック）で確認間隔とベッド探索範囲を調整できます。
 - Discord連携には`DISCORD_TOKEN`, `DISCORD_CHANNEL_ID`を設定し、Discord Developer PortalでMessage Content Intentを有効にします。
 - Geminiによる生成応答には`GEMINI_API_KEY`を設定します。未設定時は簡易フォールバック応答を返します。Jevは明示的な`Jev:`指示にだけ使います。
