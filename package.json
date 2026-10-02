@@ -7,7 +7,7 @@
     "start": "node src/index.js",
     "build:container": "tsc --project tsconfig.node.json",
     "start:container": "node dist/bot/app.js",
-    "test": "node --test",
+    "test": "npm run build:container && node --test",
     "worker:dev": "wrangler dev",
     "worker:deploy": "wrangler deploy",
     "worker:typecheck": "tsc --project tsconfig.worker.json"

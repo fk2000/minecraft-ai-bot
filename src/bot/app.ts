@@ -6,9 +6,9 @@ import mineflayer, { type Bot } from 'mineflayer';
 import pathfinderPlugin, { Movements, goals } from 'mineflayer-pathfinder';
 import {
   evaluateAutonomy,
-  evaluateMessage,
+  evaluatePlayerRequest,
   type JevAutonomyChoice,
-  type JevEvaluation
+  type JevPlayerEvaluation
 } from '../jev/evaluator.js';
 
 type ChatSource = 'minecraft' | 'discord';
@@ -43,9 +43,9 @@ const commandHelpText = process.env.COMMAND_HELP_TEXT?.trim() ||
   '使えるコマンド: !help, !ping, !come, !stop, !build, !goals, !goal, !hold, !weather, !difficulty';
 const pingMinecraftServer = minecraftProtocol.ping;
 const toxicityThreshold = 0.7;
-const llmThreshold = 0.6;
 const { pathfinder, goals: { GoalNear } } = pathfinderPlugin;
 const autonomyConfidenceThreshold = 0.55;
+const playerActionConfidenceThreshold = 0.65;
 const autonomyRiskThreshold = 0.7;
 const autonomyUsefulnessThreshold = 0.35;
 const hostileMobNames = new Set([
@@ -177,13 +177,13 @@ function logMinecraftConnectionEvent(event: string, reason: unknown, sendToDisco
 async function generateReply(
   username: string,
   content: string,
-  evaluation: JevEvaluation
+  evaluation: JevPlayerEvaluation
 ): Promise<string> {
   if (!ai) return 'もう少し詳しく教えてくれたら、一緒に考えるよ。';
 
   const response = await ai.models.generateContent({
     model: process.env.GEMINI_MODEL ?? 'gemini-3.8-flash',
-    contents: `${username}: ${content}\nSystem 1 intent: ${evaluation.choice}; need_llm score: ${evaluation.score.need_llm}; confidence: ${evaluation.choiceConfidence}`,
+    contents: `${username}: ${content}\nJev route: ${evaluation.choice}; confidence: ${evaluation.choiceConfidence}`,
     config: {
       systemInstruction: [
         'あなたはMinecraftの世界にいる明るく頼もしい日本語の相棒です。',
@@ -200,13 +200,23 @@ async function relay(input: ChatInput): Promise<void> {
   const content = input.content.trim();
   if (!content) return;
   lastPlayerActivityAt = Date.now();
+  const requestActivityAt = lastPlayerActivityAt;
   cancelAutonomyMovement();
 
-  let evaluation: JevEvaluation;
+  const connectedBot = minecraftBot && !minecraftBot._client.ended ? minecraftBot : undefined;
+  const gameContext = connectedBot?.entity?.position ? getAutonomyContext(connectedBot) : undefined;
+  const allowedActions = gameContext?.allowedChoices ?? [];
+
+  let evaluation: JevPlayerEvaluation;
   try {
-    evaluation = await evaluateMessage(content, jevEnv);
+    evaluation = await evaluatePlayerRequest(
+      content,
+      gameContext?.state ?? JSON.stringify({ minecraftConnected: false, allowedActions: [] }),
+      allowedActions,
+      jevEnv
+    );
   } catch (error) {
-    console.error(`[jev] Failed to evaluate ${input.source} message from ${input.username}:`, error);
+    console.error(`[jev] Failed to route ${input.source} message from ${input.username}:`, error);
     return;
   }
 
@@ -215,15 +225,15 @@ async function relay(input: ChatInput): Promise<void> {
     source: input.source,
     choice: evaluation.choice,
     choiceConfidence: evaluation.choiceConfidence,
-    toxicity: evaluation.score.toxicity,
-    needLlm: evaluation.score.need_llm,
-    noul: evaluation.noul,
+    toxicity: evaluation.toxicity,
+    needLlm: evaluation.needLlm,
+    noul: evaluation.uncertain,
     durationMs: evaluation.durationMs,
     model: evaluation.model
   }));
 
-  if (evaluation.noul || evaluation.choice === 'spam_or_abuse' ||
-      evaluation.score.toxicity > toxicityThreshold) {
+  if (evaluation.uncertain || evaluation.choice === 'spam_or_abuse' ||
+      evaluation.toxicity > toxicityThreshold) {
     console.warn(`[jev] Ignored unsafe or invalid ${input.source} message from ${input.username}`);
     return;
   }
@@ -245,20 +255,67 @@ async function relay(input: ChatInput): Promise<void> {
 
   if (!isMentioned) return;
 
+  if (evaluation.choice === 'explore' || evaluation.choice === 'socialize' ||
+      evaluation.choice === 'survive' || evaluation.choice === 'observe' ||
+      evaluation.choice === 'rest') {
+    const bot = minecraftBot;
+    if (!bot || bot._client.ended || !gameContext?.allowedChoices.includes(evaluation.choice)) {
+      await input.reply('今はその行動ができるゲーム状況ではないみたい。');
+      return;
+    }
+    if (evaluation.choiceConfidence < playerActionConfidenceThreshold ||
+        lastPlayerActivityAt !== requestActivityAt) {
+      await input.reply('指示の意図を安全に判断できなかったので、今回は行動しないね。もう少し具体的にお願い。');
+      return;
+    }
+    if (autonomyRunning) {
+      await input.reply('いま別の行動を進めているよ。終わったらまたお願いね。');
+      return;
+    }
+
+    autonomyRunning = true;
+    let actionReply: string;
+    try {
+      const currentContext = getAutonomyContext(bot);
+      if (!currentContext.allowedChoices.includes(evaluation.choice)) {
+        actionReply = '周囲の状況が変わったので、今回は行動しないね。';
+      } else {
+        await performAutonomyChoice(bot, evaluation.choice, currentContext, true);
+        const actionReplies: Record<JevAutonomyChoice, string> = {
+          survive: '危険から離れるね。',
+          socialize: '近くのプレイヤーや動物のところへ行くね。',
+          explore: '周りを少し探索してくるね。',
+          observe: 'その場で周りの様子を確認するね。',
+          rest: '了解、その場で待っているね。'
+        };
+        actionReply = actionReplies[evaluation.choice];
+      }
+    } catch (error) {
+      console.error(`[action] Jev-approved ${evaluation.choice} failed:`, error);
+      actionReply = '行動を始められなかったよ。安全のため、その場で止まっているね。';
+    } finally {
+      autonomyRunning = false;
+    }
+    try {
+      await input.reply(actionReply);
+    } catch (error) {
+      console.error(`[chat] Failed to acknowledge Jev-approved ${evaluation.choice}:`, error);
+    }
+    return;
+  }
+
   let reply: string | undefined;
   if (evaluation.choice === 'server_rules') {
     reply = rulesText;
   } else if (evaluation.choice === 'command_help') {
     reply = commandHelpText;
-  } else if (evaluation.choice === 'casual_chat' && evaluation.score.need_llm > llmThreshold) {
+  } else if (evaluation.choice === 'conversation') {
     try {
       reply = await generateReply(input.username, content, evaluation);
     } catch (error) {
       console.error('[llm] Failed to generate a reply:', error);
       reply = 'ごめんね、今はうまく考えられなかったよ。';
     }
-  } else if (evaluation.choice === 'casual_chat') {
-    reply = 'なるほど、聞いてるよ。';
   }
 
   if (reply) {
@@ -382,8 +439,15 @@ function getAutonomyContext(bot: Bot): {
   return { state, allowedChoices, nearbyPlayers, nearbyAnimals, nearbyHostiles };
 }
 
-async function moveAutonomously(bot: Bot, x: number, y: number, z: number): Promise<void> {
-  if (minecraftBot !== bot || bot._client.ended || Date.now() - lastPlayerActivityAt < autonomyIdleAfterMs) {
+async function moveAutonomously(
+  bot: Bot,
+  x: number,
+  y: number,
+  z: number,
+  allowWhilePlayerActive = false
+): Promise<void> {
+  if (minecraftBot !== bot || bot._client.ended ||
+      (!allowWhilePlayerActive && Date.now() - lastPlayerActivityAt < autonomyIdleAfterMs)) {
     return;
   }
   await bot.pathfinder.goto(new GoalNear(x, y, z, 2));
@@ -392,7 +456,8 @@ async function moveAutonomously(bot: Bot, x: number, y: number, z: number): Prom
 async function performAutonomyChoice(
   bot: Bot,
   choice: JevAutonomyChoice,
-  context: ReturnType<typeof getAutonomyContext>
+  context: ReturnType<typeof getAutonomyContext>,
+  allowWhilePlayerActive = false
 ): Promise<void> {
   if (choice === 'survive') {
     const hostile = context.nearbyHostiles[0];
@@ -405,7 +470,8 @@ async function performAutonomyChoice(
       bot,
       Math.floor(position.x + (dx / distance) * 8),
       position.y,
-      Math.floor(position.z + (dz / distance) * 8)
+      Math.floor(position.z + (dz / distance) * 8),
+      allowWhilePlayerActive
     );
     return;
   }
@@ -414,13 +480,25 @@ async function performAutonomyChoice(
     const player = context.nearbyPlayers[0];
     if (player) {
       const target = bot.players[player.name]?.entity;
-      if (target) await moveAutonomously(bot, target.position.x, target.position.y, target.position.z);
+      if (target) await moveAutonomously(
+        bot,
+        target.position.x,
+        target.position.y,
+        target.position.z,
+        allowWhilePlayerActive
+      );
       return;
     }
     const animal = context.nearbyAnimals[0];
     if (animal) {
       const target = bot.entities[animal.id];
-      if (target?.position) await moveAutonomously(bot, target.position.x, target.position.y, target.position.z);
+      if (target?.position) await moveAutonomously(
+        bot,
+        target.position.x,
+        target.position.y,
+        target.position.z,
+        allowWhilePlayerActive
+      );
     }
     return;
   }
@@ -433,7 +511,8 @@ async function performAutonomyChoice(
       bot,
       Math.floor(position.x + Math.cos(angle) * radius),
       position.y,
-      Math.floor(position.z + Math.sin(angle) * radius)
+      Math.floor(position.z + Math.sin(angle) * radius),
+      allowWhilePlayerActive
     );
   }
 }

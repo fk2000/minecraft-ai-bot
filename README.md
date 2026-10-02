@@ -80,7 +80,7 @@ Cloudflare Workerは30分間隔の監視用途で、MineflayerやDiscord Gateway
 
 既存のローカル設定との互換性のため、`MC_SERVER_HOST`/`MC_SERVER_PORT`が未指定の場合は`MC_HOST`/`MC_PORT`も読み込みます。コンテナ環境では`MC_SERVER_*`の使用を推奨します。
 
-Jevは両方のチャット入力を評価します。無効/Noul、`spam_or_abuse`、またはtoxicityが0.7を超える入力は返信も転送もしません。安全な発言のみ相手のプラットフォームへ転送し、MinecraftではBotへの呼びかけ時、Discordでは指定チャンネルの発言時に限って応答します。ルール・コマンド案内は固定文で返し、Geminiは`casual_chat`かつ`need_llm > 0.6`の場合だけ呼び出します。デプロイ先には`JEV_API_KEY`、`DISCORD_TOKEN`、必要なら`GEMINI_API_KEY`をSecretとして登録し、Minecraftホスト/ポートをWorker監視設定と同じ値にします。
+Jevは両方のチャット入力を一度だけ分類し、無効/Noul、`spam_or_abuse`、またはtoxicityが0.7を超える入力は返信も転送もしません。会話の文章生成はGeminiが担当し、ルール・コマンド案内は固定文で返します。Botへの明示的な安全行動指示はJevが会話と区別し、ゲーム状態に応じて許可済みの探索・接近・退避・観察・待機から判定します。信頼度が低い場合、曖昧な場合、または現在の状況で許可されない行動は実行しません。デプロイ先には`JEV_API_KEY`、`DISCORD_TOKEN`、必要なら`GEMINI_API_KEY`をSecretとして登録し、Minecraftホスト/ポートをWorker監視設定と同じ値にします。
 
 ローカル確認は`npm run build:container`と`npm run start:container`、コンテナ実行は`docker build -t minecraft-ai-bot .`および環境変数を設定して`docker run --env-file .env minecraft-ai-bot`です。既存の`npm start`は従来のNode.jsボットを起動します。
 
