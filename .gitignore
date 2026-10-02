@@ -1,4 +1,16 @@
 node_modules/
+dist/
 .env
+.env.*
+!.env.example
+.minecraft-auth/
+.dev.vars
+.dev.vars.*
+.wrangler/
 logs/
+coverage/
+.cache/
+.npm/
+.DS_Store
+*.log
 npm-debug.log*

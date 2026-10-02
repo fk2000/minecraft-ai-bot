@@ -414,7 +414,10 @@ function runAutonomyCycle() {
   if (tryHandleNightSleep(now)) return;
   if (now >= nextAutonomyGoalAt) {
     if (autonomyActive) cancelAutonomyGoal();
-    currentAutonomyGoal = chooseRandomAutonomyGoal(getAutonomyGoals());
+    const safeGoals = getAutonomyGoals().filter((goal) =>
+      ['explore', 'visit_player', 'visit_animal'].includes(goal.kind)
+    );
+    currentAutonomyGoal = chooseRandomAutonomyGoal(safeGoals);
     autonomyGoalComplete = false;
     nextAutonomyGoalAt = now + autonomyIntervalMs;
     lastAutonomyDeferredReason = undefined;

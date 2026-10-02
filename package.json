@@ -5,13 +5,26 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test"
+    "build:container": "tsc --project tsconfig.node.json",
+    "start:container": "node dist/bot/app.js",
+    "test": "node --test",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "wrangler deploy",
+    "worker:typecheck": "tsc --project tsconfig.worker.json"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",
+    "discord.js": "^14.27.0",
     "dotenv": "^16.4.7",
+    "minecraft-protocol": "^1.68.0",
     "mineflayer": "^4.28.0",
     "mineflayer-pathfinder": "^2.4.5",
     "prismarine-chat": "^1.10.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@types/node": "^26.6.4",
+    "typescript": "^5.9.3",
+    "wrangler": "^3.114.17"
   }
 }

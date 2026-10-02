@@ -1,0 +1,16 @@
+name = "minecraft-ai-bot-monitor"
+main = "src/index.ts"
+compatibility_date = "2025-03-01"
+workers_dev = true
+
+[triggers]
+crons = ["*/30 * * * *"]
+
+[[kv_namespaces]]
+binding = "MY_BOT_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+MC_SERVER_HOST = "your-minecraft-server.example"
+MC_SERVER_PORT = "25565"
+CHECK_TIMEOUT_MS = "2000"
