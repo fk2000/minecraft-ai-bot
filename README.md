@@ -1,6 +1,6 @@
 # Minecraft AI Bot
 
-MineflayerとGemini APIを使うMinecraftボットです。クライアントプロトコルは26.1に設定し、ViaVersionとViaBackwardsを導入した26.3サーバーへの接続を想定しています。`!`で始まる発言はGeminiに送信せず、通常コマンドとして処理します。
+Mineflayer、Gemini API、Jevを使うMinecraftボットです。自律行動の選択と実行はMineflayer、会話生成はGeminiが担当し、プレイヤーが`Jev: 指示`形式で明示した場合だけJevで行動意図を判定します。クライアントプロトコルは26.1に設定し、ViaVersionとViaBackwardsを導入した26.3サーバーへの接続を想定しています。`!`で始まる発言はGeminiに送信せず、通常コマンドとして処理します。
 
 ## セットアップ
 
@@ -66,22 +66,23 @@ ViaVersion単体が主に対応するのは新しいクライアントから古�
 
 ## Jev付きコンテナBot (Mineflayer + Discord)
 
-Cloudflare Workerは30分間隔の監視用途で、MineflayerやDiscord Gatewayの常時接続には使えません。両方の接続とJev判定を常時稼働させる場合は、リポジトリをRender Background Worker、Railway、Fly.ioなどのNode.jsコンテナへデプロイします。`Dockerfile`はNode.js 22でTypeScriptをビルドし、`src/bot/app.ts`を起動します。
+Cloudflare Workerは30分間隔の監視用途で、MineflayerやDiscord Gatewayの常時接続には使えません。両方の接続とBot処理を常時稼働させる場合は、リポジトリをRender Background Worker、Railway、Fly.ioなどのNode.jsコンテナへデプロイします。`Dockerfile`はNode.js 22でTypeScriptをビルドし、`src/bot/app.ts`を起動します。
 
 必須のコンテナ環境変数:
 
 - `MC_SERVER_HOST`, `MC_SERVER_PORT`, `MC_USERNAME`
 - Microsoft認証を使う場合は`MC_AUTH=microsoft`と`MC_AUTH_CACHE_DIR=/data/minecraft-auth`を設定し、`/data`にRailway Volumeをマウントします。
 - `JEV_API_KEY`
-- Jevによる安全な自律行動は`AUTONOMY_INTERVAL_MS`（既定30分）ごとに計画し、プレイヤーが`AUTONOMY_IDLE_AFTER_MS`（既定6秒）以上操作していない場合に実行します。Minecraft内では明確な行動指示ならBot名を付けなくてもJevの判定結果に基づいて実行します。
+- Jevによる明示的な指示判定は、MinecraftまたはDiscordで`Jev: ここに来て`のように入力した場合だけ行います。`JEV_DAILY_LIMIT`（既定3回/UTC日）を上限に、枠は`Jev:`指示だけで消費します。通常会話と自律行動ではJevを呼び出しません。上限到達後の`Jev:`指示は翌日のUTC 0時まで保留します。再試行は無効で、1枠につきAPIリクエストは最大1回です。
+- 自律行動はMineflayer内の安全なローカルルールで選択し、`AUTONOMY_INTERVAL_MS`（既定6秒）ごとにゲーム状況を確認します。プレイヤー操作直後や行動中は次の計画を待ちます。自律行動はJevの1日上限に影響されません。
 - Botはオーバーワールドで夜間または雷雨になると、近くのベッドを探して自動で就寝します。`NIGHT_SLEEP_CHECK_INTERVAL_MS`（既定5秒）と`BED_SEARCH_DISTANCE`（既定64ブロック）で確認間隔とベッド探索範囲を調整できます。
 - Discord連携には`DISCORD_TOKEN`, `DISCORD_CHANNEL_ID`を設定し、Discord Developer PortalでMessage Content Intentを有効にします。
-- Geminiによる生成応答には`GEMINI_API_KEY`を設定します。未設定時もJevの固定応答とフィルタリングは動作し、LLM生成が必要な場合は簡易フォールバックを返します。
+- Geminiによる生成応答には`GEMINI_API_KEY`を設定します。未設定時は簡易フォールバック応答を返します。Jevは明示的な`Jev:`指示にだけ使います。
 - 任意設定: `MC_AUTH`, `MC_VERSION`, `GEMINI_MODEL`, `SERVER_RULES_TEXT`, `COMMAND_HELP_TEXT`
 
 既存のローカル設定との互換性のため、`MC_SERVER_HOST`/`MC_SERVER_PORT`が未指定の場合は`MC_HOST`/`MC_PORT`も読み込みます。コンテナ環境では`MC_SERVER_*`の使用を推奨します。
 
-Jevは両方のチャット入力を一度だけ分類し、無効/Noul、`spam_or_abuse`、またはtoxicityが0.7を超える入力は返信も転送もしません。会話の文章生成はGeminiが担当し、ルール・コマンド案内は固定文で返します。Botへの明示的な安全行動指示はJevが会話と区別し、ゲーム状態に応じて許可済みの探索・接近・退避・観察・待機から判定します。信頼度が低い場合、曖昧な場合、または現在の状況で許可されない行動は実行しません。デプロイ先には`JEV_API_KEY`、`DISCORD_TOKEN`、必要なら`GEMINI_API_KEY`をSecretとして登録し、Minecraftホスト/ポートをWorker監視設定と同じ値にします。
+通常会話の判定にJevは使わず、Minecraft内ではBotへの呼びかけがある場合にGeminiで応答します。Jevは`Jev: ここに来て`のように明示された指示だけを判定し、1日上限とゲーム状況に応じて、許可済みの探索・接近・退避・観察・待機だけを実行します。自律行動の選択はJevではなく、ゲーム状態と許可リストに基づくMineflayerのローカルルールで行います。デプロイ先には`JEV_API_KEY`、`DISCORD_TOKEN`、必要なら`GEMINI_API_KEY`をSecretとして登録し、Minecraftホスト/ポートをWorker監視設定と同じ値にします。
 
 ローカル確認は`npm run build:container`と`npm run start:container`、コンテナ実行は`docker build -t minecraft-ai-bot .`および環境変数を設定して`docker run --env-file .env minecraft-ai-bot`です。既存の`npm start`は従来のNode.jsボットを起動します。
 
@@ -108,7 +109,7 @@ NODE_ENV=production
 ```
 
 `JEV_API_KEY`、`MC_SERVER_HOST`は必須です。Discord連携には`DISCORD_TOKEN`と`DISCORD_CHANNEL_ID`を両方設定し、Discord Developer PortalでMessage Content Intentを有効にします。`GEMINI_API_KEY`は任意で、未設定時は高精度LLMの代わりに簡易フォールバック応答を使います。
-`MC_AUTH`は`offline`（既定）、`microsoft`、`mojang`から選べます。`MC_USERNAME`を変更するときはRailway Variablesを更新してサービスを再起動してください。`MC_RECONNECT_INTERVAL_MS`は再接続バックオフの基本値（既定10000ms）、`MC_PING_TIMEOUT_MS`は再接続前のMinecraft TCP status pingのタイムアウト（既定5000ms）、`MC_RECONNECT_RESET_AFTER_MS`は接続が安定したと判断してバックオフをリセットするまでの時間（既定120000ms）です。`AUTONOMY_INTERVAL_MS`はJevに自律行動を相談する間隔（既定30分）、`AUTONOMY_IDLE_AFTER_MS`はプレイヤーの操作後に自律行動を控える時間（既定6秒）です。夜間の就寝確認は`NIGHT_SLEEP_CHECK_INTERVAL_MS`（既定5000ms）ごとに行い、`BED_SEARCH_DISTANCE`（既定64）ブロック以内のベッドを探します。必要なら`DISCORD_LOG_CHANNEL_ID`を追加するとkick、切断、エラー、再接続予定をそのチャンネルにも記録します。
+`MC_AUTH`は`offline`（既定）、`microsoft`、`mojang`から選べます。`MC_USERNAME`を変更するときはRailway Variablesを更新してサービスを再起動してください。`MC_RECONNECT_INTERVAL_MS`は再接続バックオフの基本値（既定10000ms）、`MC_PING_TIMEOUT_MS`は再接続前のMinecraft TCP status pingのタイムアウト（既定5000ms）、`MC_RECONNECT_RESET_AFTER_MS`は接続が安定したと判断してバックオフをリセットするまでの時間（既定120000ms）です。`AUTONOMY_INTERVAL_MS`はMineflayerによる自律行動の状況確認間隔（既定6000ms）、`AUTONOMY_IDLE_AFTER_MS`はプレイヤーの操作後に自律行動を控える時間（既定6秒）です。Jev判定は`Jev: 指示`形式の明示的なチャット指示に限られ、`JEV_DAILY_LIMIT`（既定3回/UTC日）で制限されます。利用数ファイルは`JEV_USAGE_STATE_PATH`で変更でき、既定では`MC_AUTH_CACHE_DIR`内の`jev-daily-usage.json`に保存されます。Railwayでは認証キャッシュと同じく永続Volume内に保存してください（例: `MC_AUTH_CACHE_DIR=/data/minecraft-auth`）。利用状態を保存できない場合は上限を守るためJevを呼び出しません。夜間の就寝確認は`NIGHT_SLEEP_CHECK_INTERVAL_MS`（既定5000ms）ごとに行い、`BED_SEARCH_DISTANCE`（既定64）ブロック以内のベッドを探します。必要なら`DISCORD_LOG_CHANNEL_ID`を追加するとkick、切断、エラー、再接続予定をそのチャンネルにも記録します。
 4. DeploymentsのビルドログでDockerイメージのビルド完了を確認し、実行ログに`[discord] Logged in as ...`および`[minecraft] spawned: connected successfully`が出ることを確認します。Volumeと`MC_AUTH_CACHE_DIR`を設定して起動した後、最初の一度だけMicrosoftのデバイス認証を完了します。認証キャッシュはトークンを含むため、Volumeへのアクセスを制限し、内容をログやGitへ出さないでください。切断後は10秒、20秒、30秒と間隔を増やして最大60秒で再接続し、毎回ログイン前にMinecraft TCP status pingを行います。サーバー停止中はログインを試さず30秒ごとに再確認します。短時間でkickされる場合に再試行が10秒へ戻り続けないよう、バックオフは既定2分間安定接続できた後にリセットします。Jev自律行動で許可しているのは周囲の探索、近くのプレイヤー/友好Mobへの接近、危険Mobからの退避、観察・待機のみです。pathfinderの採掘とドア操作を無効にし、保護プラグイン導入前はブロック破壊を伴うタスクを実行しません。
 
 ## Cloudflare Workers 監視

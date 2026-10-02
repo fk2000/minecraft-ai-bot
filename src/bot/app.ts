@@ -1,16 +1,21 @@
 import 'dotenv/config';
+import { join } from 'node:path';
 import { GoogleGenAI } from '@google/genai';
 import { Client, Events, GatewayIntentBits, type Message } from 'discord.js';
 import minecraftProtocol from 'minecraft-protocol';
 import mineflayer, { type Bot } from 'mineflayer';
 import pathfinderPlugin, { Movements, goals } from 'mineflayer-pathfinder';
 import {
-  evaluateAutonomy,
   evaluatePlayerRequest,
   type JevAutonomyChoice,
   type JevPlayerEvaluation
 } from '../jev/evaluator.js';
-import { canSleepInMinecraftContext, shouldRoutePlayerChoice } from './behavior.js';
+import { JevDailyQuota, type JevQuotaReservation } from '../jev/daily-quota.js';
+import {
+  canSleepInMinecraftContext,
+  chooseMineflayerAutonomyChoice
+} from './behavior.js';
+import { parseJevCommand } from './jev-command.js';
 import { parseDifficultyCommand } from './world-command.js';
 
 type ChatSource = 'minecraft' | 'discord';
@@ -31,10 +36,14 @@ const minecraftPort = readPort(process.env.MC_SERVER_PORT ?? process.env.MC_PORT
 const minecraftUsername = process.env.MC_USERNAME?.trim() || 'JevAIBot';
 const minecraftAuth = readMinecraftAuth(process.env.MC_AUTH);
 const minecraftAuthCacheDir = process.env.MC_AUTH_CACHE_DIR?.trim() || './.minecraft-auth';
+const jevDailyLimit = readPositiveInteger(process.env.JEV_DAILY_LIMIT, 3, 'JEV_DAILY_LIMIT');
+const jevDailyQuota = new JevDailyQuota(
+  process.env.JEV_USAGE_STATE_PATH?.trim() || join(minecraftAuthCacheDir, 'jev-daily-usage.json')
+);
 const reconnectIntervalMs = readPositiveInteger(process.env.MC_RECONNECT_INTERVAL_MS, 10_000, 'MC_RECONNECT_INTERVAL_MS');
 const minecraftPingTimeoutMs = readPositiveInteger(process.env.MC_PING_TIMEOUT_MS, 5_000, 'MC_PING_TIMEOUT_MS');
 const reconnectResetAfterMs = readPositiveInteger(process.env.MC_RECONNECT_RESET_AFTER_MS, 120_000, 'MC_RECONNECT_RESET_AFTER_MS');
-const autonomyIntervalMs = readPositiveInteger(process.env.AUTONOMY_INTERVAL_MS, 30 * 60_000, 'AUTONOMY_INTERVAL_MS');
+const autonomyIntervalMs = readPositiveInteger(process.env.AUTONOMY_INTERVAL_MS, 6_000, 'AUTONOMY_INTERVAL_MS');
 const autonomyIdleAfterMs = readPositiveInteger(process.env.AUTONOMY_IDLE_AFTER_MS, 6_000, 'AUTONOMY_IDLE_AFTER_MS');
 const nightSleepCheckIntervalMs = readPositiveInteger(process.env.NIGHT_SLEEP_CHECK_INTERVAL_MS, 5_000, 'NIGHT_SLEEP_CHECK_INTERVAL_MS');
 const bedSearchDistance = Math.min(128, readPositiveInteger(process.env.BED_SEARCH_DISTANCE, 64, 'BED_SEARCH_DISTANCE'));
@@ -52,10 +61,7 @@ const developerUsernames = (process.env.DEVELOPER_USERNAMES ?? '.fujiwarakaz,fuj
 const pingMinecraftServer = minecraftProtocol.ping;
 const toxicityThreshold = 0.7;
 const { pathfinder, goals: { GoalNear } } = pathfinderPlugin;
-const autonomyConfidenceThreshold = 0.55;
 const playerActionConfidenceThreshold = 0.65;
-const autonomyRiskThreshold = 0.7;
-const autonomyUsefulnessThreshold = 0.35;
 const hostileMobNames = new Set([
   'blaze', 'cave_spider', 'creeper', 'drowned', 'enderman', 'husk', 'magma_cube',
   'phantom', 'pillager', 'ravager', 'silverfish', 'skeleton', 'slime', 'spider',
@@ -189,13 +195,15 @@ function logMinecraftConnectionEvent(event: string, reason: unknown, sendToDisco
 async function generateReply(
   username: string,
   content: string,
-  evaluation: JevPlayerEvaluation
+  evaluation?: JevPlayerEvaluation
 ): Promise<string> {
   if (!ai) return 'もう少し詳しく教えてくれたら、一緒に考えるよ。';
 
   const response = await ai.models.generateContent({
     model: process.env.GEMINI_MODEL ?? 'gemini-3.8-flash',
-    contents: `${username}: ${content}\nJev route: ${evaluation.choice}; confidence: ${evaluation.choiceConfidence}`,
+    contents: `${username}: ${content}${evaluation
+      ? `\nJev route: ${evaluation.choice}; confidence: ${evaluation.choiceConfidence}`
+      : ''}`,
     config: {
       systemInstruction: [
         'あなたはMinecraftの世界にいる明るく頼もしい日本語の相棒です。',
@@ -246,44 +254,12 @@ async function relay(input: ChatInput): Promise<void> {
     return;
   }
 
-  const connectedBot = minecraftBot && !minecraftBot._client.ended ? minecraftBot : undefined;
-  const gameContext = connectedBot?.entity?.position
-    ? getAutonomyContext(connectedBot, input.source === 'minecraft' ? input.username : undefined)
-    : undefined;
-  const allowedActions = gameContext?.allowedChoices ?? [];
-
-  let evaluation: JevPlayerEvaluation;
-  try {
-    evaluation = await evaluatePlayerRequest(
-      content,
-      gameContext?.state ?? JSON.stringify({ minecraftConnected: false, allowedActions: [] }),
-      allowedActions,
-      jevEnv
-    );
-  } catch (error) {
-    console.error(`[jev] Failed to route ${input.source} message from ${input.username}:`, error);
+  const jevCommand = parseJevCommand(content);
+  if (jevCommand && !jevCommand.instruction) {
+    await input.reply('使い方: Jev: ここに来て / Jev: 周囲を探索して');
     return;
   }
 
-  console.info(JSON.stringify({
-    event: 'chat.evaluated',
-    source: input.source,
-    choice: evaluation.choice,
-    choiceConfidence: evaluation.choiceConfidence,
-    toxicity: evaluation.toxicity,
-    needLlm: evaluation.needLlm,
-    noul: evaluation.uncertain,
-    durationMs: evaluation.durationMs,
-    model: evaluation.model
-  }));
-
-  if (evaluation.uncertain || evaluation.choice === 'spam_or_abuse' ||
-      evaluation.toxicity > toxicityThreshold) {
-    console.warn(`[jev] Ignored unsafe or invalid ${input.source} message from ${input.username}`);
-    return;
-  }
-
-  const isMentioned = input.source === 'discord' || isMentionedInMinecraft(content);
   const forward = input.source === 'minecraft'
     ? async () => postToDiscord(`**[MC] ${input.username}:** ${content}`)
     : async () => {
@@ -291,14 +267,77 @@ async function relay(input: ChatInput): Promise<void> {
       if (!bot || bot._client.ended) throw new Error('Minecraft bot is not connected');
       bot.chat(formatMinecraftText(`[Discord] ${input.username}: ${content}`));
     };
-
   try {
     await forward();
   } catch (error) {
     console.error(`[relay] Failed to forward ${input.source} message from ${input.username}:`, error);
   }
 
-  if (!shouldRoutePlayerChoice(evaluation.choice, isMentioned)) return;
+  if (!jevCommand) {
+    if (input.source === 'minecraft' && !isMentionedInMinecraft(content)) return;
+    try {
+      await input.reply(await generateReply(input.username, content));
+    } catch (error) {
+      console.error('[llm] Failed to generate a reply:', error);
+      await input.reply('ごめんね、今はうまく考えられなかったよ。');
+    }
+    return;
+  }
+
+  const connectedBot = minecraftBot && !minecraftBot._client.ended ? minecraftBot : undefined;
+  const gameContext = connectedBot?.entity?.position
+    ? getAutonomyContext(connectedBot, input.source === 'minecraft' ? input.username : undefined)
+    : undefined;
+  const allowedActions = gameContext?.allowedChoices ?? [];
+
+  let reservation: JevQuotaReservation;
+  try {
+    reservation = await jevDailyQuota.reserve(jevDailyLimit);
+  } catch (error) {
+    console.error('[jev] Could not reserve daily quota; refusing to call Jev:', error);
+    await input.reply('Jevの利用状況を確認できないため、安全のため今回は処理を保留するね。');
+    return;
+  }
+  if (!reservation.allowed) {
+    console.info(`[jev] Daily limit reached (${reservation.used}/${jevDailyLimit}); reset at ${reservation.resetsAt.toISOString()}`);
+    await input.reply(`今日のJev判定上限（${jevDailyLimit}回）に達したよ。UTC 0時以降にまたお願いね。`);
+    return;
+  }
+
+  let evaluation: JevPlayerEvaluation;
+  try {
+    evaluation = await evaluatePlayerRequest(
+      jevCommand.instruction,
+      gameContext?.state ?? JSON.stringify({ minecraftConnected: false, allowedActions: [] }),
+      allowedActions,
+      jevEnv,
+      { maxRetries: 0 }
+    );
+  } catch (error) {
+    console.error(`[jev] Failed to route ${input.source} message from ${input.username}:`, error);
+    await input.reply('Jevの判定に失敗したため、今回は実行しないね。');
+    return;
+  }
+
+  console.info(JSON.stringify({
+    event: 'jev.command.evaluated',
+    source: input.source,
+    choice: evaluation.choice,
+    choiceConfidence: evaluation.choiceConfidence,
+    toxicity: evaluation.toxicity,
+    noul: evaluation.uncertain,
+    quotaUsed: reservation.used,
+    quotaRemaining: reservation.remaining,
+    durationMs: evaluation.durationMs,
+    model: evaluation.model
+  }));
+
+  if (evaluation.uncertain || evaluation.choice === 'spam_or_abuse' ||
+      evaluation.toxicity > toxicityThreshold) {
+    console.warn(`[jev] Rejected unsafe or invalid Jev command from ${input.username}`);
+    await input.reply('安全に判定できなかったので、今回は実行しないね。');
+    return;
+  }
 
   if (evaluation.choice === 'explore' || evaluation.choice === 'socialize' ||
       evaluation.choice === 'survive' || evaluation.choice === 'observe' ||
@@ -367,7 +406,7 @@ async function relay(input: ChatInput): Promise<void> {
     reply = commandHelpText;
   } else if (evaluation.choice === 'conversation') {
     try {
-      reply = await generateReply(input.username, content, evaluation);
+      reply = await generateReply(input.username, jevCommand.instruction, evaluation);
     } catch (error) {
       console.error('[llm] Failed to generate a reply:', error);
       reply = 'ごめんね、今はうまく考えられなかったよ。';
@@ -691,37 +730,30 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
   autonomyRunning = true;
   try {
     const context = getAutonomyContext(bot);
-    const evaluation = await evaluateAutonomy(context.state, context.allowedChoices, jevEnv);
+    const choice = chooseMineflayerAutonomyChoice(context.allowedChoices, recentAutonomyChoices);
     console.info(JSON.stringify({
-      event: 'autonomy.evaluated',
-      choice: evaluation.choice,
-      confidence: evaluation.choiceConfidence,
-      risk: evaluation.risk,
-      uncertain: evaluation.uncertain,
-      durationMs: evaluation.durationMs,
-      model: evaluation.model
+      event: 'autonomy.selected',
+      planner: 'mineflayer',
+      choice,
+      allowedChoices: context.allowedChoices
     }));
 
     if (shuttingDown || minecraftBot !== bot || bot._client.ended ||
         Date.now() - lastPlayerActivityAt < autonomyIdleAfterMs) {
-      console.info('[autonomy] Discarded plan because the game state changed during evaluation');
+      console.info('[autonomy] Discarded plan because the game state changed during selection');
       return;
     }
-    if (!context.allowedChoices.includes(evaluation.choice) ||
-        evaluation.choiceConfidence < autonomyConfidenceThreshold ||
-        (evaluation.risk >= autonomyRiskThreshold && evaluation.choice !== 'survive') ||
-        evaluation.uncertain ||
-        (evaluation.usefulness < autonomyUsefulnessThreshold && evaluation.choice !== 'survive')) {
-      console.info('[autonomy] No action taken; Jev found the plan unsafe, uncertain, or low-value');
+    if (!choice || !context.allowedChoices.includes(choice)) {
+      console.info('[autonomy] No safe Mineflayer action is currently available');
       return;
     }
 
-    recentAutonomyChoices.push(evaluation.choice);
+    recentAutonomyChoices.push(choice);
     if (recentAutonomyChoices.length > 3) recentAutonomyChoices.shift();
-    await performAutonomyChoice(bot, evaluation.choice, context);
-    console.info(`[autonomy] Completed safe action: ${evaluation.choice}`);
+    await performAutonomyChoice(bot, choice, context);
+    console.info(`[autonomy] Mineflayer completed safe action: ${choice}`);
   } catch (error) {
-    console.error('[autonomy] Jev planning or safe action failed:', error);
+    console.error('[autonomy] Mineflayer planning or safe action failed:', error);
   } finally {
     autonomyRunning = false;
     scheduleAutonomy(bot);

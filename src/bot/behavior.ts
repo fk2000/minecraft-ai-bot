@@ -2,6 +2,7 @@ import {
   JEV_PLAYER_ACTION_CHOICES,
   type JevPlayerChoice
 } from '../jev/evaluator.js';
+import type { JevAutonomyChoice } from '../jev/evaluator.js';
 
 export interface MinecraftSleepContext {
   dimension: string | undefined;
@@ -26,4 +27,20 @@ export function canSleepInMinecraftContext(context: MinecraftSleepContext): bool
 
 export function shouldRoutePlayerChoice(choice: JevPlayerChoice, isMentioned: boolean): boolean {
   return isMentioned || JEV_PLAYER_ACTION_CHOICES.some((action) => action === choice);
+}
+
+export function chooseMineflayerAutonomyChoice(
+  allowedChoices: readonly JevAutonomyChoice[],
+  recentChoices: readonly JevAutonomyChoice[]
+): JevAutonomyChoice | undefined {
+  const priority: readonly JevAutonomyChoice[] = [
+    'survive',
+    'socialize',
+    'explore',
+    'observe',
+    'rest'
+  ];
+  const availableChoices = priority.filter((choice) => allowedChoices.includes(choice));
+  return availableChoices.find((choice) => !recentChoices.includes(choice)) ??
+    availableChoices[0];
 }

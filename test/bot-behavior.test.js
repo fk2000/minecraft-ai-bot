@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   canSleepInMinecraftContext,
+  chooseMineflayerAutonomyChoice,
   shouldRoutePlayerChoice
 } from '../dist/bot/behavior.js';
 
@@ -36,4 +37,16 @@ test('automatic sleeping is limited to nighttime or thunderstorms in the overwor
     isRaining: false,
     thunderState: 0
   }), false);
+});
+
+test('autonomous action is selected locally without Jev and avoids recent choices', () => {
+  assert.equal(
+    chooseMineflayerAutonomyChoice(['explore', 'observe', 'rest'], []),
+    'explore'
+  );
+  assert.equal(
+    chooseMineflayerAutonomyChoice(['explore', 'observe', 'rest'], ['explore']),
+    'observe'
+  );
+  assert.equal(chooseMineflayerAutonomyChoice([], []), undefined);
 });
