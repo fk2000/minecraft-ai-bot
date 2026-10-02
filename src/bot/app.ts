@@ -10,6 +10,7 @@ import {
   type JevAutonomyChoice,
   type JevPlayerEvaluation
 } from '../jev/evaluator.js';
+import { canSleepInMinecraftContext, shouldRoutePlayerChoice } from './behavior.js';
 import { parseDifficultyCommand } from './world-command.js';
 
 type ChatSource = 'minecraft' | 'discord';
@@ -35,6 +36,8 @@ const minecraftPingTimeoutMs = readPositiveInteger(process.env.MC_PING_TIMEOUT_M
 const reconnectResetAfterMs = readPositiveInteger(process.env.MC_RECONNECT_RESET_AFTER_MS, 120_000, 'MC_RECONNECT_RESET_AFTER_MS');
 const autonomyIntervalMs = readPositiveInteger(process.env.AUTONOMY_INTERVAL_MS, 30 * 60_000, 'AUTONOMY_INTERVAL_MS');
 const autonomyIdleAfterMs = readPositiveInteger(process.env.AUTONOMY_IDLE_AFTER_MS, 6_000, 'AUTONOMY_IDLE_AFTER_MS');
+const nightSleepCheckIntervalMs = readPositiveInteger(process.env.NIGHT_SLEEP_CHECK_INTERVAL_MS, 5_000, 'NIGHT_SLEEP_CHECK_INTERVAL_MS');
+const bedSearchDistance = Math.min(128, readPositiveInteger(process.env.BED_SEARCH_DISTANCE, 64, 'BED_SEARCH_DISTANCE'));
 const discordToken = process.env.DISCORD_TOKEN?.trim();
 const discordChannelId = process.env.DISCORD_CHANNEL_ID?.trim();
 const discordLogChannelId = process.env.DISCORD_LOG_CHANNEL_ID?.trim();
@@ -84,6 +87,10 @@ let isConnecting = false;
 let shuttingDown = false;
 let connectionStableTimer: ReturnType<typeof setTimeout> | undefined;
 let autonomyTimer: ReturnType<typeof setTimeout> | undefined;
+let nightSleepCheckTimer: ReturnType<typeof setInterval> | undefined;
+let nightSleepActive = false;
+let nightSleepGeneration = 0;
+let nextNightSleepAttemptAt = 0;
 let lastPlayerActivityAt = Date.now();
 const recentAutonomyChoices: JevAutonomyChoice[] = [];
 let autonomyRunning = false;
@@ -207,6 +214,7 @@ async function relay(input: ChatInput): Promise<void> {
   lastPlayerActivityAt = Date.now();
   const requestActivityAt = lastPlayerActivityAt;
   cancelAutonomyMovement();
+  cancelNightSleepForPlayerActivity();
 
   const difficultyCommand = input.source === 'minecraft'
     ? parseDifficultyCommand(content)
@@ -288,7 +296,7 @@ async function relay(input: ChatInput): Promise<void> {
     console.error(`[relay] Failed to forward ${input.source} message from ${input.username}:`, error);
   }
 
-  if (!isMentioned) return;
+  if (!shouldRoutePlayerChoice(evaluation.choice, isMentioned)) return;
 
   if (evaluation.choice === 'explore' || evaluation.choice === 'socialize' ||
       evaluation.choice === 'survive' || evaluation.choice === 'observe' ||
@@ -394,6 +402,97 @@ function cancelAutonomyMovement(): void {
 function clearAutonomyTimer(): void {
   if (autonomyTimer) clearTimeout(autonomyTimer);
   autonomyTimer = undefined;
+}
+
+function clearNightSleepCheckTimer(): void {
+  if (nightSleepCheckTimer) clearInterval(nightSleepCheckTimer);
+  nightSleepCheckTimer = undefined;
+  nightSleepActive = false;
+  nightSleepGeneration += 1;
+}
+
+function cancelNightSleepForPlayerActivity(): void {
+  if (!nightSleepActive) return;
+  nightSleepGeneration += 1;
+  nightSleepActive = false;
+  nextNightSleepAttemptAt = Date.now() + nightSleepCheckIntervalMs;
+  console.info('[sleep] Cancelled bed navigation after player activity');
+}
+
+function canBotSleepNow(bot: Bot): boolean {
+  return canSleepInMinecraftContext({
+    dimension: bot.game?.dimension,
+    timeOfDay: bot.time?.timeOfDay,
+    isRaining: bot.isRaining,
+    thunderState: bot.thunderState
+  });
+}
+
+async function trySleepInNearestBed(bot: Bot): Promise<void> {
+  if (shuttingDown || minecraftBot !== bot || bot._client.ended ||
+      bot.isSleeping || nightSleepActive || Date.now() < nextNightSleepAttemptAt ||
+      !bot.entity?.position || !canBotSleepNow(bot) || autonomyRunning) {
+    return;
+  }
+
+  const bed = bot.findBlock({
+    matching: (block) => Boolean(block && bot.isABed(block)),
+    maxDistance: bedSearchDistance
+  });
+  if (!bed) {
+    console.info('[sleep] No bed found nearby; will check again later');
+    nextNightSleepAttemptAt = Date.now() + 10_000;
+    return;
+  }
+
+  const generation = ++nightSleepGeneration;
+  nightSleepActive = true;
+  console.info(JSON.stringify({
+    event: 'night_sleep.started',
+    position: { x: bed.position.x, y: bed.position.y, z: bed.position.z }
+  }));
+
+  try {
+    await bot.pathfinder.goto(new GoalNear(bed.position.x, bed.position.y, bed.position.z, 1));
+    if (generation !== nightSleepGeneration || shuttingDown ||
+        minecraftBot !== bot || bot._client.ended || !canBotSleepNow(bot)) {
+      return;
+    }
+
+    const currentBed = bot.blockAt(bed.position);
+    if (!currentBed || !bot.isABed(currentBed)) {
+      throw new Error('Bed is no longer available');
+    }
+    await bot.sleep(currentBed);
+    console.info('[sleep] Sleeping in bed');
+  } catch (error) {
+    if (generation !== nightSleepGeneration) return;
+    nextNightSleepAttemptAt = Date.now() + 5_000;
+    console.warn('[sleep] Could not sleep in the nearest bed:', error);
+  } finally {
+    if (generation === nightSleepGeneration) nightSleepActive = false;
+  }
+}
+
+function startNightSleepChecks(bot: Bot): void {
+  clearNightSleepCheckTimer();
+  nextNightSleepAttemptAt = 0;
+  nightSleepCheckTimer = setInterval(() => {
+    if (minecraftBot !== bot || bot._client.ended) return;
+    if (bot.isSleeping) {
+      if (!canBotSleepNow(bot)) {
+        void bot.wake().then(() => {
+          console.info('[sleep] Woke after nighttime ended');
+        }).catch((error: unknown) => {
+          console.warn('[sleep] Could not wake after night:', error);
+        });
+      }
+      return;
+    }
+    if (!canBotSleepNow(bot)) return;
+    void trySleepInNearestBed(bot);
+  }, nightSleepCheckIntervalMs);
+  nightSleepCheckTimer.unref();
 }
 
 function scheduleAutonomy(bot: Bot, delayMs = autonomyIntervalMs): void {
@@ -646,6 +745,7 @@ function disconnectMineflayerBot(bot: Bot, reason: unknown, event: 'kicked' | 'e
   minecraftBot = undefined;
   if (activeMinecraftListeners?.bot === bot) activeMinecraftListeners = undefined;
   clearAutonomyTimer();
+  clearNightSleepCheckTimer();
   autonomyRunning = false;
   bot.pathfinder?.setGoal(null);
   if (connectionStableTimer) clearTimeout(connectionStableTimer);
@@ -688,6 +788,7 @@ function onSpawn(): void {
   lastPlayerActivityAt = Date.now();
   recentAutonomyChoices.length = 0;
   scheduleAutonomy(bot);
+  startNightSleepChecks(bot);
   logMinecraftConnectionEvent('spawned', 'connected successfully');
   if (connectionStableTimer) clearTimeout(connectionStableTimer);
   connectionStableTimer = setTimeout(() => {
@@ -801,6 +902,7 @@ function shutdown(signal: NodeJS.Signals): void {
   console.info(`[process] Received ${signal}; shutting down`);
   clearReconnectTimer();
   clearAutonomyTimer();
+  clearNightSleepCheckTimer();
   if (connectionStableTimer) clearTimeout(connectionStableTimer);
   connectionStableTimer = undefined;
   isReconnecting = false;
