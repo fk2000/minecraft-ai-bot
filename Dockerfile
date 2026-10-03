@@ -5,6 +5,7 @@ RUN npm ci
 COPY src/bot/app.ts src/bot/
 COPY src/bot/world-command.ts src/bot/
 COPY src/bot/behavior.ts src/bot/
+COPY src/bot/command.ts src/bot/
 COPY src/bot/jev-command.ts src/bot/
 COPY src/jev ./src/jev
 RUN npm run build:container

@@ -4,6 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 import { Client, Events, GatewayIntentBits, type Message } from 'discord.js';
 import minecraftProtocol from 'minecraft-protocol';
 import mineflayer, { type Bot, type Player } from 'mineflayer';
+import type { Vec3 } from 'vec3';
 import pathfinderPlugin, { Movements, goals } from 'mineflayer-pathfinder';
 import {
   evaluatePlayerRequest,
@@ -17,8 +18,9 @@ import {
   formatPlayerJoinGreeting,
   isComeHereCommand
 } from './behavior.js';
+import { parseBotCommand } from './command.js';
 import { parseJevCommand } from './jev-command.js';
-import { parseDifficultyCommand } from './world-command.js';
+import { parseDifficultyCommand, parseWeatherCommand } from './world-command.js';
 
 type ChatSource = 'minecraft' | 'discord';
 
@@ -54,8 +56,8 @@ const discordChannelId = process.env.DISCORD_CHANNEL_ID?.trim();
 const discordLogChannelId = process.env.DISCORD_LOG_CHANNEL_ID?.trim();
 const rulesText = process.env.SERVER_RULES_TEXT?.trim() ||
   'ルール: 荒らし禁止・他プレイヤーへの迷惑行為禁止です。';
-const commandHelpText = process.env.COMMAND_HELP_TEXT?.trim() ||
-  '使えるコマンド: !help, !ping, !come, !stop, !build, !goals, !goal, !hold, !weather, !difficulty';
+const commandHelpText =
+  '使えるコマンド: !help, !ping, !come, !stop, !build, !goals, !goal [survive|socialize|explore|observe|rest], !hold [アイテム名], !weather [clear|rain|thunder], !difficulty [peaceful|easy|normal|hard]';
 const developerUsernames = (process.env.DEVELOPER_USERNAMES ?? '.fujiwarakaz,fujiwarakaz')
   .split(',')
   .map((username) => username.trim().toLowerCase())
@@ -102,6 +104,7 @@ let nextNightSleepAttemptAt = 0;
 let lastPlayerActivityAt = Date.now();
 const recentAutonomyChoices: JevAutonomyChoice[] = [];
 let autonomyRunning = false;
+let activeBuild: { cancelled: boolean } | undefined;
 
 function readPort(value: string | undefined): number {
   const port = Number(value ?? '25565');
@@ -226,33 +229,15 @@ async function relay(input: ChatInput): Promise<void> {
   cancelAutonomyMovement();
   cancelNightSleepForPlayerActivity();
 
-  const difficultyCommand = input.source === 'minecraft'
-    ? parseDifficultyCommand(content)
-    : null;
+  const botCommand = parseBotCommand(content);
+  if (botCommand) {
+    await handleBotCommand(input, botCommand);
+    return;
+  }
+
+  const difficultyCommand = input.source === 'minecraft' ? parseDifficultyCommand(content) : null;
   if (difficultyCommand) {
-    if (!developerUsernames.includes(input.username.trim().toLowerCase())) {
-      await input.reply('難易度の変更は開発者だけが実行できるよ。');
-      return;
-    }
-    if (!difficultyCommand.value) {
-      await input.reply('使い方: !difficulty peaceful|easy|normal|hard');
-      return;
-    }
-
-    const bot = minecraftBot;
-    if (!bot || bot._client.ended) {
-      await input.reply('Minecraftサーバーに接続していないので、難易度を変更できないよ。');
-      return;
-    }
-
-    bot.chat(`/difficulty ${difficultyCommand.value}`);
-    console.info(JSON.stringify({
-      event: 'world_command.sent',
-      actor: input.username,
-      type: 'difficulty',
-      value: difficultyCommand.value
-    }));
-    await input.reply(`難易度を${difficultyCommand.value}に変更するコマンドを送ったよ。`);
+    await sendWorldCommand(input, 'difficulty', difficultyCommand.value);
     return;
   }
 
@@ -260,6 +245,283 @@ async function relay(input: ChatInput): Promise<void> {
   if (jevCommand && !jevCommand.instruction) {
     await input.reply('使い方: Jev: ここに来て / Jev: 周囲を探索して');
     return;
+  }
+
+  async function handleBotCommand(
+    input: ChatInput,
+    command: NonNullable<ReturnType<typeof parseBotCommand>>
+  ): Promise<void> {
+    if (command.type === 'help') {
+      await input.reply(commandHelpText);
+      return;
+    }
+    if (command.type === 'ping') {
+      await input.reply('pong');
+      return;
+    }
+    if (command.type === 'weather' || command.type === 'difficulty') {
+      const parsed = command.type === 'weather'
+        ? parseWeatherCommand(`!weather ${command.value ?? ''}`)
+        : parseDifficultyCommand(`!difficulty ${command.value ?? ''}`);
+      if (!parsed?.value) {
+        const values = command.type === 'weather'
+          ? 'clear|rain|thunder'
+          : 'peaceful|easy|normal|hard';
+        await input.reply(`使い方: !${command.type} ${values}`);
+        return;
+      }
+      await sendWorldCommand(input, command.type, parsed.value);
+      return;
+    }
+    if (command.type === 'unsupported') {
+      await input.reply(`!${command.name} は使えないコマンドだよ。${commandHelpText}`);
+      return;
+    }
+
+    const bot = minecraftBot;
+    if (!bot || bot._client.ended || !bot.entity?.position) {
+      await input.reply('Minecraftサーバーに接続していないので、コマンドを実行できないよ。');
+      return;
+    }
+
+    if (command.type === 'come') {
+      await moveToRequestingPlayer(input, bot);
+      return;
+    }
+    if (command.type === 'stop') {
+      if (activeBuild) activeBuild.cancelled = true;
+      bot.pathfinder.setGoal(null);
+      bot.stopDigging();
+      bot.deactivateItem();
+      bot.clearControlStates();
+      await input.reply(activeBuild ? '移動と建築を止めるよ。' : '移動を止めたよ。');
+      return;
+    }
+    if (command.type === 'build') {
+      if (autonomyRunning) {
+        await input.reply('いま別の行動を進めているよ。終わったらまたお願いね。');
+        return;
+      }
+      await buildHut(input, bot);
+      return;
+    }
+    if (command.type === 'hold') {
+      const normalizedQuery = command.query.toLowerCase().replace(/\s+/g, '_');
+      const item = bot.inventory.items().find((candidate) =>
+        candidate.name.toLowerCase().includes(normalizedQuery) ||
+        candidate.displayName?.toLowerCase().includes(command.query.toLowerCase())
+      );
+      if (!item) {
+        await input.reply(command.query
+          ? `${command.query}はインベントリに見つからないよ。`
+          : '使い方: !hold [アイテム名]');
+        return;
+      }
+      try {
+        await bot.equip(item, 'hand');
+        await input.reply(`${item.displayName ?? item.name}を手に持ったよ。`);
+      } catch (error) {
+        console.error('[command] Failed to equip requested item:', error);
+        await input.reply('そのアイテムを手に持てなかったよ。');
+      }
+      return;
+    }
+    if (command.type === 'goals') {
+      await input.reply('設定できる目標: survive (生存), socialize (交流), explore (探索), observe (観察), rest (待機)');
+      return;
+    }
+    if (command.type === 'goal') {
+      if (!command.choice) {
+        await input.reply('使い方: !goal survive|socialize|explore|observe|rest');
+        return;
+      }
+      if (autonomyRunning) {
+        await input.reply('いま別の行動を進めているよ。終わったらまたお願いね。');
+        return;
+      }
+      const context = getAutonomyContext(
+        bot,
+        input.source === 'minecraft' ? input.username : undefined
+      );
+      if (!context.allowedChoices.includes(command.choice)) {
+        await input.reply('今はその目標を安全に実行できないみたい。周囲を確認してからもう一度お願い。');
+        return;
+      }
+      autonomyRunning = true;
+      try {
+        await performAutonomyChoice(
+          bot,
+          command.choice,
+          context,
+          true,
+          input.source === 'minecraft' ? input.username : undefined
+        );
+        await input.reply('目標の行動を実行したよ。');
+      } catch (error) {
+        console.error(`[command] Goal ${command.choice} failed:`, error);
+        await input.reply('目標を実行できなかったよ。');
+      } finally {
+        autonomyRunning = false;
+      }
+    }
+  }
+
+  async function sendWorldCommand(
+    input: ChatInput,
+    type: 'weather' | 'difficulty',
+    value: string | null
+  ): Promise<void> {
+    if (!developerUsernames.includes(input.username.trim().toLowerCase())) {
+      await input.reply(`${type === 'weather' ? '天気' : '難易度'}の変更は開発者だけが実行できるよ。`);
+      return;
+    }
+    if (!value) {
+      const usage = type === 'weather' ? '!weather clear|rain|thunder' : '!difficulty peaceful|easy|normal|hard';
+      await input.reply(`使い方: ${usage}`);
+      return;
+    }
+    const bot = minecraftBot;
+    if (!bot || bot._client.ended) {
+      await input.reply('Minecraftサーバーに接続していないので、設定を変更できないよ。');
+      return;
+    }
+    bot.chat(`/${type} ${value}`);
+    console.info(JSON.stringify({
+      event: 'world_command.sent',
+      actor: input.username,
+      type,
+      value
+    }));
+    await input.reply(`${type === 'weather' ? '天気' : '難易度'}を${value}に変更するコマンドを送ったよ。`);
+  }
+
+  async function moveToRequestingPlayer(input: ChatInput, bot: Bot): Promise<void> {
+    const targetName = input.source === 'minecraft'
+      ? input.username
+      : Object.entries(bot.players).find(([name, player]) =>
+        name !== bot.username && player.entity
+      )?.[0];
+    const target = targetName ? bot.players[targetName]?.entity : undefined;
+    if (!target) {
+      await input.reply('近くに移動先のプレイヤーが見つからないよ。');
+      return;
+    }
+    if (autonomyRunning) {
+      await input.reply('いま別の行動を進めているよ。終わったらまたお願いね。');
+      return;
+    }
+    autonomyRunning = true;
+    try {
+      await input.reply(`${targetName}のところへ行くね。`);
+      await bot.pathfinder.goto(new GoalNear(
+        target.position.x,
+        target.position.y,
+        target.position.z,
+        2
+      ));
+      if (minecraftBot === bot && !bot._client.ended) {
+        await input.reply(`${targetName}のところに着いたよ。`);
+      }
+    } catch (error) {
+      console.error(`[command] Could not move to ${targetName}:`, error);
+      if (minecraftBot === bot && !bot._client.ended) {
+        await input.reply('そこまで行けなかったよ。道を確認して、もう一度呼んでね。');
+      }
+    } finally {
+      autonomyRunning = false;
+    }
+  }
+
+  async function buildHut(input: ChatInput, bot: Bot): Promise<void> {
+    if (activeBuild) {
+      await input.reply('もう建築中だよ。');
+      return;
+    }
+
+    const build = { cancelled: false };
+    activeBuild = build;
+    autonomyRunning = true;
+    try {
+      const origin = bot.entity.position.floored().offset(2, 0, 0);
+      const plan = createHutPlan(origin);
+      const planks = bot.inventory.items().filter((item) => item.name.endsWith('_planks'));
+      const available = planks.reduce((total, item) => total + item.count, 0);
+      if (available < plan.length) {
+        await input.reply(`板材があと${plan.length - available}個足りないよ！`);
+        return;
+      }
+
+      for (const position of plan) {
+        const block = bot.blockAt(position);
+        if (!block || block.boundingBox !== 'empty') {
+          await input.reply('建築場所に障害物があるみたい。場所を空けてから試してね。');
+          return;
+        }
+      }
+      for (const position of plan.slice(0, 9)) {
+        const ground = bot.blockAt(position.offset(0, -1, 0));
+        if (ground?.boundingBox !== 'block') {
+          await input.reply('地面が平らでないか、足場がないみたい。');
+          return;
+        }
+      }
+
+      await input.reply('近くに小さな木の小屋を建てるよ。止めるときは !stop を使ってね。');
+      for (const position of plan) {
+        if (build.cancelled || minecraftBot !== bot || bot._client.ended) return;
+        const plank = bot.inventory.items().find((item) => item.name.endsWith('_planks'));
+        const reference = findPlacementReference(bot, position);
+        if (!plank || !reference) throw new Error('No plank or supporting block available');
+        await bot.equip(plank, 'hand');
+        await bot.placeBlock(reference, position.minus(reference.position));
+      }
+      if (!build.cancelled && minecraftBot === bot && !bot._client.ended) {
+        await input.reply('小屋が完成したよ！');
+      }
+    } catch (error) {
+      console.error('[command] Hut building failed:', error);
+      if (minecraftBot === bot && !bot._client.ended) {
+        await input.reply('建築に失敗したよ。足場や設置できる場所を確認してね。');
+      }
+    } finally {
+      if (activeBuild === build) activeBuild = undefined;
+      autonomyRunning = false;
+    }
+  }
+
+  function createHutPlan(origin: Vec3): Vec3[] {
+    const plan: Vec3[] = [];
+    for (let x = -1; x <= 1; x += 1) {
+      for (let z = -1; z <= 1; z += 1) plan.push(origin.offset(x, 0, z));
+    }
+    for (const y of [1, 2]) {
+      for (let x = -1; x <= 1; x += 1) {
+        for (let z = -1; z <= 1; z += 1) {
+          const isWall = Math.abs(x) === 1 || Math.abs(z) === 1;
+          const isDoorway = x === -1 && z === 0;
+          if (isWall && !isDoorway) plan.push(origin.offset(x, y, z));
+        }
+      }
+    }
+    for (let x = -1; x <= 1; x += 1) {
+      for (let z = -1; z <= 1; z += 1) {
+        if (x !== 0 || z !== 0) plan.push(origin.offset(x, 3, z));
+      }
+    }
+    plan.push(origin.offset(0, 3, 0));
+    return plan;
+  }
+
+  function findPlacementReference(bot: Bot, position: Vec3) {
+    const offsets = [
+      [0, -1, 0], [0, 0, -1], [0, 0, 1],
+      [-1, 0, 0], [1, 0, 0], [0, 1, 0]
+    ] as const;
+    for (const [x, y, z] of offsets) {
+      const block = bot.blockAt(position.offset(x, y, z));
+      if (block?.boundingBox === 'block') return block;
+    }
+    return null;
   }
 
   const forward = input.source === 'minecraft'
@@ -277,36 +539,11 @@ async function relay(input: ChatInput): Promise<void> {
 
   if (input.source === 'minecraft' && isComeHereCommand(content)) {
     const bot = minecraftBot;
-    const target = bot?.players[input.username]?.entity;
-    if (!bot || bot._client.ended || !target) {
+    if (!bot || bot._client.ended || !bot.entity?.position) {
       await input.reply('今はあなたの場所が確認できないので、近くでもう一度呼んでね。');
       return;
     }
-    if (autonomyRunning) {
-      await input.reply('いま別の行動を進めているよ。終わったらまたお願いね。');
-      return;
-    }
-
-    autonomyRunning = true;
-    try {
-      await input.reply(`${input.username}のところへ行くね。`);
-      await bot.pathfinder.goto(new GoalNear(
-        target.position.x,
-        target.position.y,
-        target.position.z,
-        2
-      ));
-      if (minecraftBot === bot && !bot._client.ended) {
-        await input.reply(`${input.username}のところに着いたよ。`);
-      }
-    } catch (error) {
-      console.error(`[action] Direct come-here request from ${input.username} failed:`, error);
-      if (minecraftBot === bot && !bot._client.ended) {
-        await input.reply('そこまで行けなかったよ。道を確認して、もう一度呼んでね。');
-      }
-    } finally {
-      autonomyRunning = false;
-    }
+    await moveToRequestingPlayer(input, bot);
     return;
   }
 

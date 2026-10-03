@@ -4,6 +4,12 @@ export interface DifficultyCommand {
   value: MinecraftDifficulty | null;
 }
 
+export type MinecraftWeather = 'clear' | 'rain' | 'thunder';
+
+export interface WeatherCommand {
+  value: MinecraftWeather | null;
+}
+
 const difficultyValues: Record<string, MinecraftDifficulty> = {
   peaceful: 'peaceful',
   ピースフル: 'peaceful',
@@ -31,4 +37,23 @@ export function parseDifficultyCommand(message: string): DifficultyCommand | nul
   if (!naturalMatch) return null;
 
   return { value: difficultyValues[naturalMatch[1]] ?? null };
+}
+
+const weatherValues: Record<string, MinecraftWeather> = {
+  clear: 'clear',
+  晴れ: 'clear',
+  晴天: 'clear',
+  快晴: 'clear',
+  rain: 'rain',
+  雨: 'rain',
+  雨天: 'rain',
+  thunder: 'thunder',
+  雷雨: 'thunder',
+  雷: 'thunder'
+};
+
+export function parseWeatherCommand(message: string): WeatherCommand | null {
+  const match = /^!weather(?:\s+(\S+))?$/i.exec(message.trim());
+  if (!match) return null;
+  return { value: weatherValues[match[1]?.toLowerCase() ?? ''] ?? null };
 }
