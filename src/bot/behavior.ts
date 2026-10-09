@@ -55,6 +55,8 @@ export function chooseMineflayerAutonomyChoice(
     'rest'
   ];
   const availableChoices = priority.filter((choice) => allowedChoices.includes(choice));
-  return availableChoices.find((choice) => !recentChoices.includes(choice)) ??
+  return availableChoices.find((choice) =>
+    choice === 'survive' || choice === 'explore' || !recentChoices.includes(choice)
+  ) ??
     availableChoices[0];
 }

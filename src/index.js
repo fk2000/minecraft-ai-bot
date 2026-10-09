@@ -17,7 +17,7 @@ const developerUsernames = (process.env.DEVELOPER_USERNAMES || '.fujiwarakaz,fuj
 const activityLogPath = process.env.ACTIVITY_LOG_PATH ?? DEFAULT_ACTIVITY_LOG_PATH;
 const idleWanderAfterMs = readPositiveInteger(process.env.IDLE_WANDER_AFTER_MS, 6000);
 const idleWanderRadius = Math.min(16, readPositiveInteger(process.env.IDLE_WANDER_RADIUS, 6));
-const autonomyIntervalMs = readPositiveInteger(process.env.AUTONOMY_INTERVAL_MS, 30 * 60 * 1000);
+const autonomyIntervalMs = readPositiveInteger(process.env.AUTONOMY_INTERVAL_MS, 6000);
 const autonomyActionIntervalMs = readPositiveInteger(process.env.AUTONOMY_ACTION_INTERVAL_MS, 6000);
 const idleWanderAvoidNames = (process.env.IDLE_WANDER_AVOID_BLOCKS ?? 'chair,seat').split(',');
 const bedSearchDistance = Math.min(128, readPositiveInteger(process.env.BED_SEARCH_DISTANCE, 64));
@@ -413,11 +413,12 @@ function runAutonomyCycle() {
   const now = Date.now();
   if (tryHandleNightSleep(now)) return;
   if (now >= nextAutonomyGoalAt) {
-    if (autonomyActive) cancelAutonomyGoal();
+    if (autonomyActive) return;
     const safeGoals = getAutonomyGoals().filter((goal) =>
       ['explore', 'visit_player', 'visit_animal'].includes(goal.kind)
     );
-    currentAutonomyGoal = chooseRandomAutonomyGoal(safeGoals);
+    currentAutonomyGoal = safeGoals.find((goal) => goal.kind === 'explore') ??
+      chooseRandomAutonomyGoal(safeGoals);
     autonomyGoalComplete = false;
     nextAutonomyGoalAt = now + autonomyIntervalMs;
     lastAutonomyDeferredReason = undefined;
@@ -425,7 +426,6 @@ function runAutonomyCycle() {
       goal: currentAutonomyGoal.kind,
       description: currentAutonomyGoal.description
     });
-    bot.chat(`30分ごとの目標: ${currentAutonomyGoal.description}だよ！`);
     console.info(`[autonomy] Goal selected: ${currentAutonomyGoal.kind}`);
   }
 

@@ -59,14 +59,26 @@ test('automatic sleeping is limited to nighttime or thunderstorms in the overwor
   }), false);
 });
 
-test('autonomous action is selected locally without Jev and avoids recent choices', () => {
+test('autonomy prioritizes safety and keeps exploring after recent choices', () => {
   assert.equal(
     chooseMineflayerAutonomyChoice(['explore', 'observe', 'rest'], []),
     'explore'
   );
   assert.equal(
     chooseMineflayerAutonomyChoice(['explore', 'observe', 'rest'], ['explore']),
-    'observe'
+    'explore'
+  );
+  assert.equal(
+    chooseMineflayerAutonomyChoice(['survive', 'explore', 'socialize'], ['survive']),
+    'survive'
+  );
+  assert.equal(
+    chooseMineflayerAutonomyChoice(['socialize', 'explore', 'observe'], []),
+    'socialize'
+  );
+  assert.equal(
+    chooseMineflayerAutonomyChoice(['socialize', 'explore', 'observe'], ['socialize']),
+    'explore'
   );
   assert.equal(chooseMineflayerAutonomyChoice([], []), undefined);
 });
