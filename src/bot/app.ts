@@ -920,6 +920,11 @@ async function moveAutonomously(
       (!allowWhilePlayerActive && Date.now() - lastPlayerActivityAt < autonomyIdleAfterMs)) {
     return;
   }
+  console.info(JSON.stringify({
+    event: 'autonomy.movement.started',
+    from: bot.entity.position.floored(),
+    target: { x, y, z }
+  }));
   await bot.pathfinder.goto(new GoalNear(x, y, z, 2));
 }
 
@@ -1005,21 +1010,48 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
     event: 'autonomy.position.checked',
     position: lastAutonomyPosition,
     previousPosition: previousPosition ?? null,
-    unchanged: previousPosition ? positionUnchanged : null
+    unchanged: previousPosition ? positionUnchanged : null,
+    health: bot.health,
+    food: bot.food,
+    playerIdleMs: Date.now() - lastPlayerActivityAt,
+    pathfinderMoving: bot.pathfinder.isMoving(),
+    sleeping: bot.isSleeping,
+    nightSleepActive,
+    building: Boolean(activeBuild)
   }));
 
   if (autonomyRunning) {
+    console.info('[autonomy] Skipped check because another action is still running');
     scheduleAutonomy(bot);
     return;
   }
 
   if (Date.now() - lastPlayerActivityAt < autonomyIdleAfterMs) {
-    console.info('[autonomy] Skipped planning because a player was recently active');
+    console.info(JSON.stringify({
+      event: 'autonomy.skipped',
+      reason: 'player_recently_active',
+      playerIdleMs: Date.now() - lastPlayerActivityAt,
+      requiredIdleMs: autonomyIdleAfterMs
+    }));
     scheduleAutonomy(bot);
     return;
   }
-  if (nightSleepActive || bot.isSleeping || activeBuild ||
-      (!positionUnchanged && bot.pathfinder.isMoving())) {
+  const pathfinderMoving = bot.pathfinder.isMoving();
+  const skipReason = nightSleepActive
+    ? 'night_sleep_active'
+    : bot.isSleeping
+      ? 'sleeping'
+      : activeBuild
+        ? 'building'
+        : !positionUnchanged && pathfinderMoving
+          ? 'pathfinder_moving'
+          : undefined;
+  if (skipReason) {
+    console.info(JSON.stringify({
+      event: 'autonomy.skipped',
+      reason: skipReason,
+      positionUnchanged
+    }));
     scheduleAutonomy(bot);
     return;
   }
@@ -1046,8 +1078,23 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
       return;
     }
     if (!choice || !context.allowedChoices.includes(choice)) {
-      console.info('[autonomy] No safe Mineflayer action is currently available');
+      console.info(JSON.stringify({
+        event: 'autonomy.skipped',
+        reason: 'no_safe_action',
+        health: bot.health,
+        food: bot.food,
+        allowedChoices: context.allowedChoices
+      }));
       return;
+    }
+    if (positionUnchanged && choice !== 'explore') {
+      console.info(JSON.stringify({
+        event: 'autonomy.stationary_fallback_unavailable',
+        choice,
+        health: bot.health,
+        food: bot.food,
+        allowedChoices: context.allowedChoices
+      }));
     }
 
     recentAutonomyChoices.push(choice);
@@ -1158,6 +1205,11 @@ function onSpawn(): void {
   } else {
     console.warn('[autonomy] Could not record initial position because the bot entity is unavailable');
   }
+  console.info(JSON.stringify({
+    event: 'autonomy.started',
+    intervalMs: autonomyIntervalMs,
+    idleAfterMs: autonomyIdleAfterMs
+  }));
   lastPlayerActivityAt = Date.now() - autonomyIdleAfterMs;
   recentAutonomyChoices.length = 0;
   scheduleAutonomy(bot);

@@ -96,6 +96,7 @@ Gemini会話には`GEMINI_API_KEY`、Discord連携には`DISCORD_TOKEN`と`DISCO
 ## Jev・Gemini・自律行動
 
 - Botの主な自律機能は待機中の移動です。コンテナ版はログイン時の座標を記録し、次の確認でも同じブロックにいた場合は近くの探索を開始します。通常版（`npm start`）とコンテナ版のどちらも、既定6秒ごとに近くを探索します。移動中に次の周期が来ても進行中の経路を中断せず、移動完了後に次の探索を始めます。
+- コンテナ版はログに初期座標（`autonomy.position.initial`）、各確認時の座標・前回座標・同じブロックかどうか（`autonomy.position.checked`）、移動要求（`autonomy.movement.started`）をJSON形式で記録します。移動を見送った場合は`autonomy.skipped`や`autonomy.stationary_fallback_unavailable`に理由が記録されます。
 - プレイヤーの操作・依頼、夜間の睡眠、安全上の制約を自律移動より優先します。コンテナ版では危険回避を優先し、探索可能な状況では他の待機行動より探索を選びます。
 - 移動周期は`AUTONOMY_INTERVAL_MS`で変更できます。通常版の待機時間は`IDLE_WANDER_AFTER_MS`、コンテナ版は`AUTONOMY_IDLE_AFTER_MS`で調整できます。既定はいずれも6秒です。
 - Jev判定は`Jev: 指示`の形式に限られます。既定上限は`JEV_DAILY_LIMIT=3`回/UTC日で、上限は永続化されます。通常会話や自律行動ではJev APIを呼びません。
