@@ -992,7 +992,8 @@ async function performAutonomyChoice(
 
 async function runAutonomyCycle(bot: Bot): Promise<void> {
   if (shuttingDown || minecraftBot !== bot || bot._client.ended || !bot.entity?.position) return;
-  const currentPosition = bot.entity.position.floored();
+  const currentPosition = bot.entity.position;
+  const previousPosition = lastAutonomyPosition;
   const positionUnchanged = lastAutonomyPosition !== undefined &&
     isSameBlockPosition(lastAutonomyPosition, currentPosition);
   lastAutonomyPosition = {
@@ -1000,6 +1001,12 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
     y: currentPosition.y,
     z: currentPosition.z
   };
+  console.info(JSON.stringify({
+    event: 'autonomy.position.checked',
+    position: lastAutonomyPosition,
+    previousPosition: previousPosition ?? null,
+    unchanged: previousPosition ? positionUnchanged : null
+  }));
 
   if (autonomyRunning) {
     scheduleAutonomy(bot);
@@ -1139,10 +1146,18 @@ function onSpawn(): void {
   movements.canOpenDoors = false;
   movements.allow1by1towers = false;
   bot.pathfinder.setMovements(movements);
-  const initialPosition = bot.entity?.position?.floored();
+  const initialPosition = bot.entity?.position;
   lastAutonomyPosition = initialPosition
     ? { x: initialPosition.x, y: initialPosition.y, z: initialPosition.z }
     : undefined;
+  if (lastAutonomyPosition) {
+    console.info(JSON.stringify({
+      event: 'autonomy.position.initial',
+      position: lastAutonomyPosition
+    }));
+  } else {
+    console.warn('[autonomy] Could not record initial position because the bot entity is unavailable');
+  }
   lastPlayerActivityAt = Date.now() - autonomyIdleAfterMs;
   recentAutonomyChoices.length = 0;
   scheduleAutonomy(bot);
