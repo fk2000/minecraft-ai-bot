@@ -11,6 +11,18 @@ export interface MinecraftSleepContext {
   thunderState: number | undefined;
 }
 
+export interface BlockPosition {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export function isSameBlockPosition(left: BlockPosition, right: BlockPosition): boolean {
+  return Math.floor(left.x) === Math.floor(right.x) &&
+    Math.floor(left.y) === Math.floor(right.y) &&
+    Math.floor(left.z) === Math.floor(right.z);
+}
+
 export function canSleepInMinecraftContext(context: MinecraftSleepContext): boolean {
   const dimension = context.dimension?.toLowerCase();
   const isOverworld = dimension === 'minecraft:overworld' ||

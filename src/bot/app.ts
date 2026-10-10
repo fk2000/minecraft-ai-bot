@@ -16,7 +16,8 @@ import {
   canSleepInMinecraftContext,
   chooseMineflayerAutonomyChoice,
   formatPlayerJoinGreeting,
-  isComeHereCommand
+  isComeHereCommand,
+  isSameBlockPosition
 } from './behavior.js';
 import { parseBotCommand } from './command.js';
 import { parseJevCommand } from './jev-command.js';
@@ -102,6 +103,7 @@ let nightSleepActive = false;
 let nightSleepGeneration = 0;
 let nextNightSleepAttemptAt = 0;
 let lastPlayerActivityAt = Date.now();
+let lastAutonomyPosition: { x: number; y: number; z: number } | undefined;
 const recentAutonomyChoices: JevAutonomyChoice[] = [];
 let autonomyRunning = false;
 let activeBuild: { cancelled: boolean } | undefined;
@@ -990,6 +992,15 @@ async function performAutonomyChoice(
 
 async function runAutonomyCycle(bot: Bot): Promise<void> {
   if (shuttingDown || minecraftBot !== bot || bot._client.ended || !bot.entity?.position) return;
+  const currentPosition = bot.entity.position.floored();
+  const positionUnchanged = lastAutonomyPosition !== undefined &&
+    isSameBlockPosition(lastAutonomyPosition, currentPosition);
+  lastAutonomyPosition = {
+    x: currentPosition.x,
+    y: currentPosition.y,
+    z: currentPosition.z
+  };
+
   if (autonomyRunning) {
     scheduleAutonomy(bot);
     return;
@@ -1000,11 +1011,21 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
     scheduleAutonomy(bot);
     return;
   }
+  if (nightSleepActive || bot.isSleeping || activeBuild ||
+      (!positionUnchanged && bot.pathfinder.isMoving())) {
+    scheduleAutonomy(bot);
+    return;
+  }
 
   autonomyRunning = true;
   try {
     const context = getAutonomyContext(bot);
-    const choice = chooseMineflayerAutonomyChoice(context.allowedChoices, recentAutonomyChoices);
+    const choice = positionUnchanged && context.allowedChoices.includes('explore')
+      ? 'explore'
+      : chooseMineflayerAutonomyChoice(context.allowedChoices, recentAutonomyChoices);
+    if (positionUnchanged && choice === 'explore') {
+      console.info('[autonomy] Position unchanged since the previous check; starting exploration');
+    }
     console.info(JSON.stringify({
       event: 'autonomy.selected',
       planner: 'mineflayer',
@@ -1077,6 +1098,7 @@ function disconnectMineflayerBot(bot: Bot, reason: unknown, event: 'kicked' | 'e
   clearAutonomyTimer();
   clearNightSleepCheckTimer();
   autonomyRunning = false;
+  lastAutonomyPosition = undefined;
   bot.pathfinder?.setGoal(null);
   if (connectionStableTimer) clearTimeout(connectionStableTimer);
   connectionStableTimer = undefined;
@@ -1117,7 +1139,11 @@ function onSpawn(): void {
   movements.canOpenDoors = false;
   movements.allow1by1towers = false;
   bot.pathfinder.setMovements(movements);
-  lastPlayerActivityAt = Date.now();
+  const initialPosition = bot.entity?.position?.floored();
+  lastAutonomyPosition = initialPosition
+    ? { x: initialPosition.x, y: initialPosition.y, z: initialPosition.z }
+    : undefined;
+  lastPlayerActivityAt = Date.now() - autonomyIdleAfterMs;
   recentAutonomyChoices.length = 0;
   scheduleAutonomy(bot);
   startNightSleepChecks(bot);

@@ -5,6 +5,7 @@ import {
   chooseMineflayerAutonomyChoice,
   formatPlayerJoinGreeting,
   isComeHereCommand,
+  isSameBlockPosition,
   shouldRoutePlayerChoice
 } from '../dist/bot/behavior.js';
 
@@ -57,6 +58,17 @@ test('automatic sleeping is limited to nighttime or thunderstorms in the overwor
     isRaining: false,
     thunderState: 0
   }), false);
+});
+
+test('position checks detect whether the bot stayed in the same block', () => {
+  assert.equal(
+    isSameBlockPosition({ x: 1.1, y: 64, z: -2.9 }, { x: 1.9, y: 64.8, z: -2.1 }),
+    true
+  );
+  assert.equal(
+    isSameBlockPosition({ x: 1, y: 64, z: -2 }, { x: 2, y: 64, z: -2 }),
+    false
+  );
 });
 
 test('autonomy prioritizes safety and keeps exploring after recent choices', () => {
