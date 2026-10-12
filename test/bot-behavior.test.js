@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  autonomousMovementSkipReason,
   canSleepInMinecraftContext,
   chooseMineflayerAutonomyChoice,
   formatPlayerJoinGreeting,
   isComeHereCommand,
   isSameBlockPosition,
+  shouldInterruptMovementForBedSleep,
+  shouldPreferBedSleepOverMovement,
   shouldRoutePlayerChoice
 } from '../dist/bot/behavior.js';
 
@@ -69,6 +72,32 @@ test('position checks detect whether the bot stayed in the same block', () => {
     isSameBlockPosition({ x: 1, y: 64, z: -2 }, { x: 2, y: 64, z: -2 }),
     false
   );
+});
+
+test('bed sleep takes priority over autonomous movement', () => {
+  const night = { canSleepNow: true, building: false, playerDirected: false };
+  assert.equal(shouldPreferBedSleepOverMovement(night), true);
+  assert.equal(shouldInterruptMovementForBedSleep({ ...night, movementInProgress: true }), true);
+  assert.equal(shouldInterruptMovementForBedSleep({ ...night, movementInProgress: false }), false);
+  assert.equal(shouldPreferBedSleepOverMovement({ ...night, playerDirected: true }), false);
+  assert.equal(shouldPreferBedSleepOverMovement({ ...night, building: true }), false);
+  assert.equal(shouldPreferBedSleepOverMovement({ ...night, canSleepNow: false }), false);
+  assert.equal(autonomousMovementSkipReason({
+    ...night,
+    sleeping: false,
+    nightSleepActive: false,
+    pathfinderMoving: true,
+    positionUnchanged: false
+  }), 'bed_sleep');
+  assert.equal(autonomousMovementSkipReason({
+    canSleepNow: false,
+    building: false,
+    playerDirected: false,
+    sleeping: false,
+    nightSleepActive: false,
+    pathfinderMoving: true,
+    positionUnchanged: false
+  }), 'pathfinder_moving');
 });
 
 test('autonomy prioritizes safety and keeps exploring after recent choices', () => {

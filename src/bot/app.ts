@@ -13,11 +13,14 @@ import {
 } from '../jev/evaluator.js';
 import { JevDailyQuota, type JevQuotaReservation } from '../jev/daily-quota.js';
 import {
+  autonomousMovementSkipReason,
   canSleepInMinecraftContext,
   chooseMineflayerAutonomyChoice,
   formatPlayerJoinGreeting,
   isComeHereCommand,
-  isSameBlockPosition
+  isSameBlockPosition,
+  shouldInterruptMovementForBedSleep,
+  shouldPreferBedSleepOverMovement
 } from './behavior.js';
 import { parseBotCommand } from './command.js';
 import { parseJevCommand } from './jev-command.js';
@@ -114,6 +117,8 @@ const conversationHistories = new Map<string, ConversationTurn[]>();
 const maxConversationTurns = 8;
 const maxConversationUsers = 100;
 let autonomyRunning = false;
+let autonomyGeneration = 0;
+let playerDirectedMovement = false;
 let activeBuild: { cancelled: boolean } | undefined;
 
 function readPort(value: string | undefined): number {
@@ -378,6 +383,7 @@ async function relay(input: ChatInput): Promise<void> {
         await input.reply('今はその目標を安全に実行できないみたい。周囲を確認してからもう一度お願い。');
         return;
       }
+      playerDirectedMovement = true;
       autonomyRunning = true;
       try {
         await performAutonomyChoice(
@@ -392,6 +398,7 @@ async function relay(input: ChatInput): Promise<void> {
         console.error(`[command] Goal ${command.choice} failed:`, error);
         await input.reply('目標を実行できなかったよ。');
       } finally {
+        playerDirectedMovement = false;
         autonomyRunning = false;
       }
     }
@@ -441,6 +448,7 @@ async function relay(input: ChatInput): Promise<void> {
       await input.reply('いま別の行動を進めているよ。終わったらまたお願いね。');
       return;
     }
+    playerDirectedMovement = true;
     autonomyRunning = true;
     try {
       await input.reply(`${targetName}のところへ行くね。`);
@@ -459,6 +467,7 @@ async function relay(input: ChatInput): Promise<void> {
         await input.reply('そこまで行けなかったよ。道を確認して、もう一度呼んでね。');
       }
     } finally {
+      playerDirectedMovement = false;
       autonomyRunning = false;
     }
   }
@@ -662,6 +671,7 @@ async function relay(input: ChatInput): Promise<void> {
       return;
     }
 
+    playerDirectedMovement = true;
     autonomyRunning = true;
     let actionReply: string;
     try {
@@ -694,6 +704,7 @@ async function relay(input: ChatInput): Promise<void> {
       console.error(`[action] Jev-approved ${evaluation.choice} failed:`, error);
       actionReply = '行動を始められなかったよ。安全のため、その場で止まっているね。';
     } finally {
+      playerDirectedMovement = false;
       autonomyRunning = false;
     }
     try {
@@ -749,11 +760,35 @@ function clearReconnectTimer(): void {
   reconnectTimer = undefined;
 }
 
-function cancelAutonomyMovement(): void {
+function stopAutonomousMovement(reason: 'player_activity' | 'sleep'): void {
   const bot = minecraftBot;
-  if (!bot || !bot.pathfinder?.goal) return;
-  bot.pathfinder.setGoal(null);
-  console.info('[autonomy] Cancelled movement after player activity');
+  const wasRunning = autonomyRunning;
+  autonomyGeneration += 1;
+  autonomyRunning = false;
+  const hadGoal = Boolean(bot?.pathfinder?.goal);
+  if (hadGoal) bot?.pathfinder.setGoal(null);
+  if (reason === 'player_activity' && hadGoal) {
+    console.info('[autonomy] Cancelled movement after player activity');
+  }
+  if (reason === 'sleep' && (wasRunning || hadGoal)) {
+    console.info('[autonomy] Cancelled movement so the bot can sleep');
+  }
+}
+
+function cancelAutonomyMovement(): void {
+  stopAutonomousMovement('player_activity');
+}
+
+function bedSleepPriority(bot: Bot): {
+  canSleepNow: boolean;
+  building: boolean;
+  playerDirected: boolean;
+} {
+  return {
+    canSleepNow: canBotSleepNow(bot),
+    building: Boolean(activeBuild),
+    playerDirected: playerDirectedMovement
+  };
 }
 
 function clearAutonomyTimer(): void {
@@ -788,8 +823,21 @@ function canBotSleepNow(bot: Bot): boolean {
 async function trySleepInNearestBed(bot: Bot): Promise<void> {
   if (shuttingDown || minecraftBot !== bot || bot._client.ended ||
       bot.isSleeping || nightSleepActive || Date.now() < nextNightSleepAttemptAt ||
-      !bot.entity?.position || !canBotSleepNow(bot) || autonomyRunning) {
+      !bot.entity?.position || !canBotSleepNow(bot) || activeBuild || playerDirectedMovement) {
     return;
+  }
+
+  if (shouldInterruptMovementForBedSleep({
+    ...bedSleepPriority(bot),
+    movementInProgress: autonomyRunning || Boolean(bot.pathfinder?.goal)
+  })) {
+    stopAutonomousMovement('sleep');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (shuttingDown || minecraftBot !== bot || bot._client.ended ||
+        bot.isSleeping || nightSleepActive || Date.now() < nextNightSleepAttemptAt ||
+        !bot.entity?.position || !canBotSleepNow(bot) || activeBuild || playerDirectedMovement) {
+      return;
+    }
   }
 
   const bed = bot.findBlock({
@@ -949,6 +997,9 @@ async function moveAutonomously(
       (!allowWhilePlayerActive && Date.now() - lastPlayerActivityAt < autonomyIdleAfterMs)) {
     return;
   }
+  if (!allowWhilePlayerActive && shouldPreferBedSleepOverMovement(bedSleepPriority(bot))) {
+    return;
+  }
   console.info('[autonomy] Starting movement toward the selected safe goal');
   await bot.pathfinder.goto(new GoalNear(x, y, z, 2));
 }
@@ -1044,7 +1095,14 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
   }));
 
   if (autonomyRunning) {
-    console.info('[autonomy] Skipped check because another action is still running');
+    if (shouldInterruptMovementForBedSleep({
+      ...bedSleepPriority(bot),
+      movementInProgress: true
+    })) {
+      stopAutonomousMovement('sleep');
+    } else {
+      console.info('[autonomy] Skipped check because another action is still running');
+    }
     scheduleAutonomy(bot);
     return;
   }
@@ -1060,15 +1118,13 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
     return;
   }
   const pathfinderMoving = bot.pathfinder.isMoving();
-  const skipReason = nightSleepActive
-    ? 'night_sleep_active'
-    : bot.isSleeping
-      ? 'sleeping'
-      : activeBuild
-        ? 'building'
-        : !positionUnchanged && pathfinderMoving
-          ? 'pathfinder_moving'
-          : undefined;
+  const skipReason = autonomousMovementSkipReason({
+    ...bedSleepPriority(bot),
+    sleeping: bot.isSleeping,
+    nightSleepActive,
+    pathfinderMoving,
+    positionUnchanged
+  });
   if (skipReason) {
     console.info(JSON.stringify({
       event: 'autonomy.skipped',
@@ -1079,6 +1135,7 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
     return;
   }
 
+  const generation = ++autonomyGeneration;
   autonomyRunning = true;
   try {
     const context = getAutonomyContext(bot);
@@ -1096,7 +1153,9 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
     }));
 
     if (shuttingDown || minecraftBot !== bot || bot._client.ended ||
-        Date.now() - lastPlayerActivityAt < autonomyIdleAfterMs) {
+        generation !== autonomyGeneration ||
+        Date.now() - lastPlayerActivityAt < autonomyIdleAfterMs ||
+        shouldPreferBedSleepOverMovement(bedSleepPriority(bot))) {
       console.info('[autonomy] Discarded plan because the game state changed during selection');
       return;
     }
@@ -1123,11 +1182,13 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
     recentAutonomyChoices.push(choice);
     if (recentAutonomyChoices.length > 3) recentAutonomyChoices.shift();
     await performAutonomyChoice(bot, choice, context);
+    if (generation !== autonomyGeneration) return;
     console.info(`[autonomy] Mineflayer completed safe action: ${choice}`);
   } catch (error) {
+    if (generation !== autonomyGeneration) return;
     console.error('[autonomy] Mineflayer planning or safe action failed:', error);
   } finally {
-    autonomyRunning = false;
+    if (generation === autonomyGeneration) autonomyRunning = false;
     scheduleAutonomy(bot);
   }
 }
