@@ -55,6 +55,36 @@ export function isComeHereCommand(message: string): boolean {
     /^(?:ねえ[、, ]*)?(?:ここ(?:に)?|こっち(?:に)?)(?:来て|きて|集合して)(?:ね|ください)?$/.test(normalized);
 }
 
+export interface BedSleepPriorityContext {
+  canSleepNow: boolean;
+  building: boolean;
+  playerDirected: boolean;
+}
+
+export function shouldPreferBedSleepOverMovement(context: BedSleepPriorityContext): boolean {
+  return context.canSleepNow && !context.building && !context.playerDirected;
+}
+
+export function shouldInterruptMovementForBedSleep(
+  context: BedSleepPriorityContext & { movementInProgress: boolean }
+): boolean {
+  return context.movementInProgress && shouldPreferBedSleepOverMovement(context);
+}
+
+export function autonomousMovementSkipReason(context: BedSleepPriorityContext & {
+  sleeping: boolean;
+  nightSleepActive: boolean;
+  pathfinderMoving: boolean;
+  positionUnchanged: boolean;
+}): 'bed_sleep' | 'night_sleep_active' | 'sleeping' | 'building' | 'pathfinder_moving' | undefined {
+  if (shouldPreferBedSleepOverMovement(context)) return 'bed_sleep';
+  if (context.nightSleepActive) return 'night_sleep_active';
+  if (context.sleeping) return 'sleeping';
+  if (context.building) return 'building';
+  if (!context.positionUnchanged && context.pathfinderMoving) return 'pathfinder_moving';
+  return undefined;
+}
+
 export function chooseMineflayerAutonomyChoice(
   allowedChoices: readonly JevAutonomyChoice[],
   recentChoices: readonly JevAutonomyChoice[]
