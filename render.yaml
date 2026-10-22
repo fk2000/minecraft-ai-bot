@@ -1,0 +1,42 @@
+# Render Blueprint: free web service (0.1 CPU / 512MB, ephemeral disk, sleeps after 15 min idle).
+# Kept awake by the Cloudflare Worker in keepalive/.
+services:
+  - type: web
+    name: minecraft-ai-bot
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # Secrets: values are entered in the Render dashboard (never commit them).
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: JEV_API_KEY
+        sync: false
+      - key: DISCORD_CHANNEL_ID
+        sync: false
+      - key: DISCORD_LOG_CHANNEL_ID
+        sync: false
+      - key: MC_SERVER_HOST
+        sync: false
+      - key: MC_SERVER_PORT
+        sync: false
+      - key: MC_USERNAME
+        sync: false
+      - key: MC_AUTH
+        sync: false
+      - key: MC_VERSION
+        sync: false
+      # Non-secret defaults. Render's disk is ephemeral, so use /tmp.
+      - key: PORT
+        value: "10000"
+      - key: MC_AUTH_CACHE_DIR
+        value: /tmp/minecraft-auth
+      - key: JEV_USAGE_STATE_PATH
+        value: /tmp/minecraft-auth/jev-daily-usage.json
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=384

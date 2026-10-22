@@ -104,6 +104,40 @@ Gemini会話には`GEMINI_API_KEY`、Discord連携には`DISCORD_TOKEN`と`DISCO
 - Gemini会話では、同じMinecraftプレイヤーまたはDiscordユーザーとの直近8往復を会話中の文脈に使います。履歴は実行中のメモリにだけ保持し、プロセス再起動時に消去します。
 - 行動の安全性・到達性はサーバー、地形、Mineflayerの状態に依存します。Botに管理者権限を与える場合は、必要な権限だけに限定し、十分にテストしてください。
 
+## Render（無料プラン）へデプロイ
+
+Railwayの代わりに、Renderの無料Webサービスで動かす構成です。Renderの無料Webサービスは15分間HTTPアクセスがないと停止するため、`keepalive/`のCloudflare Workerが10分ごとに`/healthz`へアクセスして起こし続けます。
+
+### 1. Renderでサービスを作る
+
+1. [Render](https://render.com/)にGitHubアカウントでサインアップし、このリポジトリへのアクセスを許可します（無料プランはカード登録なしで使えます）。
+2. ダッシュボードで「New」→「Blueprint」を選び、このリポジトリを指定します。`render.yaml`が読み込まれ、`minecraft-ai-bot`（Docker、free、Singapore）が作られます。
+3. `sync: false`の変数は作成時に入力を求められます。**作り直した新しい鍵**を入れてください（Railwayで使っていた古い鍵は使わないでください）。
+   - `DISCORD_TOKEN` / `GEMINI_API_KEY` / `JEV_API_KEY`
+   - `DISCORD_CHANNEL_ID` / `DISCORD_LOG_CHANNEL_ID` / `MC_SERVER_HOST` / `MC_SERVER_PORT` / `MC_USERNAME` / `MC_AUTH` / `MC_VERSION`（不要なものは空欄のままで構いません）
+4. デプロイ後、ログに`[health] listening on :10000`と`[minecraft] spawned: connected successfully`が出ることを確認します。`https://<サービス名>.onrender.com/healthz`で`{"ok":true,"minecraft":"connected",...}`が返れば成功です（鍵などの秘密情報は返しません）。
+
+`/healthz`のHTTPサーバーは環境変数`PORT`があるときだけ起動します。ローカルやRailwayでは`PORT`未設定なら従来どおり動きます。
+
+### 2. 起こし役のWorkerをデプロイする
+
+```sh
+cd keepalive
+# wrangler.toml の TARGET_URL を Render のURL（例: https://minecraft-ai-bot.onrender.com）に書き換える
+npx wrangler login
+npx wrangler deploy
+```
+
+ルートの`wrangler.toml`（サーバー監視Worker）とは別のWorker（`minecraft-ai-bot-keepalive`）です。Cloudflare Workersの無料プランで動きます。
+
+### 制限事項
+
+- **保存領域がない：** 再起動・再デプロイのたびにファイルが消えます。`MC_AUTH=microsoft`の認証キャッシュ（`/tmp/minecraft-auth`）が消えるので、Microsoftのデバイス認証をやり直す必要が出ることがあります（ログに表示されるコードで認証）。`MC_AUTH=offline`のサーバーなら影響はありません。
+- **Jevの1日の回数記録もリセットされます。** 再起動した日は、上限（既定3回）を超えてJevが呼ばれる可能性があります。記録ファイルがなければ0回から数え直すだけで、エラーにはなりません。
+- **再起動がある：** Renderの都合で予告なく再起動されることがあります。Botは起動時に自動で再接続します。
+- **性能：** CPU 0.1個分・メモリ512MBです。経路探索などで重くなる場合があります。安定させたい場合はFly.ioなどの有料プランを検討してください。
+- **750時間/月：** 無料枠はワークスペース全体で月750時間です。このサービス1つを常時動かすと約744時間でほぼ使い切るため、他の無料Webサービスと併用しないでください。
+
 ## Railwayへデプロイ
 
 このリポジトリにはDockerfileとRailway設定がありますが、公開済みのRailway Template URLや1-click Deployリンクは設定していません。Railwayで「Deploy from GitHub Repo」からリポジトリを選び、以下をサービスのVariablesへ登録してください。
