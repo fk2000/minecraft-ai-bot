@@ -23,6 +23,7 @@ import {
   shouldPreferBedSleepOverMovement
 } from './behavior.js';
 import { parseBotCommand } from './command.js';
+import { startHealthServer } from './health.js';
 import { parseJevCommand } from './jev-command.js';
 import { parseDifficultyCommand, parseWeatherCommand } from './world-command.js';
 
@@ -1442,6 +1443,11 @@ function shutdown(signal: NodeJS.Signals): void {
   discordClient?.destroy();
   setTimeout(() => process.exit(0), 5_000).unref();
 }
+
+startHealthServer(() => ({
+  minecraft: Boolean(minecraftBot && !minecraftBot._client.ended && minecraftBot.entity),
+  discord: Boolean(discordClient?.isReady())
+}));
 
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);

@@ -7,6 +7,7 @@ COPY src/bot/world-command.ts src/bot/
 COPY src/bot/behavior.ts src/bot/
 COPY src/bot/command.ts src/bot/
 COPY src/bot/jev-command.ts src/bot/
+COPY src/bot/health.ts src/bot/
 COPY src/jev ./src/jev
 RUN npm run build:container
 
@@ -16,4 +17,5 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
+EXPOSE 10000
 CMD ["node", "dist/bot/app.js"]

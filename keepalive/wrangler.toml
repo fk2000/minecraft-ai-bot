@@ -1,0 +1,13 @@
+# Separate Worker that pings the Render service so the free instance does not sleep.
+# Independent from the root wrangler.toml (minecraft-ai-bot-monitor).
+name = "minecraft-ai-bot-keepalive"
+main = "src/index.ts"
+compatibility_date = "2025-03-01"
+workers_dev = false
+
+[triggers]
+crons = ["*/10 * * * *"]
+
+[vars]
+# Replace with your Render URL before deploying, e.g. https://minecraft-ai-bot.onrender.com
+TARGET_URL = "https://REPLACE_ME.onrender.com"
