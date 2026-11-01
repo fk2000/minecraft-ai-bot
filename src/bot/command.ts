@@ -1,11 +1,12 @@
 export type BuildTrickId = 'trick1' | 'trick2' | 'trick3' | 'trick4' | 'trick5';
+export type BuildTarget = BuildTrickId | 'hut' | 'list';
 
 export type BotCommand =
   | { type: 'help' }
   | { type: 'ping' }
   | { type: 'come' }
   | { type: 'stop' }
-  | { type: 'build'; trick: BuildTrickId | 'list' | null }
+  | { type: 'build'; trick: BuildTarget | null }
   | { type: 'goals' }
   | { type: 'goal'; choice: 'survive' | 'socialize' | 'explore' | 'observe' | 'rest' | null }
   | { type: 'hold'; query: string }
@@ -53,10 +54,13 @@ const buildTrickAliases: Record<string, BuildTrickId> = {
   'redpath': 'trick5',
 };
 
-export function parseBuildTrickArg(arg: string): BuildTrickId | 'list' | null {
+export function parseBuildTrickArg(arg: string): BuildTarget | null {
   const normalized = arg.trim().toLowerCase();
   if (normalized === '' || normalized === 'list' || normalized === '一覧' || normalized === 'help') {
     return 'list';
+  }
+  if (normalized === 'hut' || normalized === '小屋' || normalized === 'こや') {
+    return 'hut';
   }
   return buildTrickAliases[normalized] ?? null;
 }

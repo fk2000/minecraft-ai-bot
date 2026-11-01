@@ -36,6 +36,12 @@ import {
   executeBuildTrick,
   type BuildExecutionContext,
 } from './build-tricks-executor.js';
+import {
+  placeBlockRobust,
+  executeBuildPlan,
+  formatPlacementError,
+  type PlacementOptions,
+} from './block-placer.js';
 
 type ChatSource = 'minecraft' | 'discord';
 
@@ -351,7 +357,7 @@ async function relay(input: ChatInput): Promise<void> {
       }
       
       if (command.trick === null) {
-        await input.reply('使い方: !build [trick1-5|一覧] 例: !build trick1, !build イルミ');
+        await input.reply('使い方: !build [hut|trick1-5|一覧] 例: !build hut, !build trick1');
         return;
       }
       
@@ -359,7 +365,12 @@ async function relay(input: ChatInput): Promise<void> {
         const trickList = TRICK_BLUEPRINTS.map(t => 
           `  ${t.id}: ${t.nameJa} (${t.name})`
         ).join('\n');
-        await input.reply(`建築トリック一覧:\n${trickList}\n使い方: !build trick1`);
+        await input.reply(`建築トリック一覧:\n  hut: 板材の小屋\n${trickList}\n使い方: !build hut または !build trick1`);
+        return;
+      }
+      
+      if (command.trick === 'hut') {
+        await buildHut(input, bot);
         return;
       }
       
@@ -579,6 +590,107 @@ async function relay(input: ChatInput): Promise<void> {
       if (activeBuild === build) activeBuild = undefined;
       autonomyRunning = false;
     }
+  }
+
+  async function buildHut(input: ChatInput, bot: Bot): Promise<void> {
+    if (activeBuild) {
+      await input.reply('もう建築中だよ。');
+      return;
+    }
+
+    const build = { cancelled: false };
+    activeBuild = build;
+    autonomyRunning = true;
+
+    try {
+      const origin = bot.entity.position.floored().offset(2, 0, 0);
+      const plan = createHutPlan(origin);
+      
+      const planks = bot.inventory.items().filter((item) => item.name.endsWith('_planks'));
+      const available = planks.reduce((total, item) => total + item.count, 0);
+      const plankName = planks[0]?.name ?? 'oak_planks';
+      
+      if (available < plan.length) {
+        await input.reply(`板材があと${plan.length - available}個足りないよ！`);
+        return;
+      }
+
+      for (const position of plan.slice(0, 9)) {
+        const ground = bot.blockAt(position.offset(0, -1, 0));
+        if (!ground || ground.boundingBox !== 'block') {
+          await input.reply('地面が平らでないか、足場がないみたい。平らな場所で試してね。');
+          return;
+        }
+      }
+
+      await input.reply('近くに小さな木の小屋を建てるよ。止めるときは !stop を使ってね。');
+
+      const result = await executeBuildPlan(bot, plan, plankName, {
+        GoalNear: goals.GoalNear,
+        maxRetries: 3,
+        retryDelayMs: 300,
+        verifyDelayMs: 150,
+        maxPlacementDistance: 4.5,
+        onProgress: (placed, total) => {
+          if (placed % 8 === 0 || placed === total) {
+            console.info(`[build] Progress: ${placed}/${total} blocks placed`);
+          }
+        },
+        isCancelled: () => build.cancelled || minecraftBot !== bot || bot._client.ended,
+      });
+
+      if (build.cancelled || minecraftBot !== bot || bot._client.ended) {
+        return;
+      }
+
+      if (result.success) {
+        await input.reply('小屋が完成したよ！');
+      } else if (result.protectionDetected) {
+        await input.reply('このエリアは保護されているか、建築権限がないみたい。場所を変えて !build hut を試してね。');
+      } else if (result.errors.length > 0) {
+        const firstError = result.errors[0];
+        const errorMsg = formatPlacementError(firstError.error);
+        await input.reply(`建築が途中で止まったよ（${result.placed}/${plan.length}ブロック）: ${errorMsg}`);
+      } else {
+        await input.reply(`小屋が一部完成したよ（${result.placed}/${plan.length}ブロック）`);
+      }
+    } catch (error) {
+      console.error('[command] Hut building failed:', error);
+      if (minecraftBot === bot && !bot._client.ended) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes('still air') || message.includes('refused')) {
+          await input.reply('サーバーがブロック設置を拒否したよ。保護エリアや権限を確認してね。');
+        } else {
+          await input.reply('建築に失敗したよ。足場や設置できる場所を確認してね。');
+        }
+      }
+    } finally {
+      if (activeBuild === build) activeBuild = undefined;
+      autonomyRunning = false;
+    }
+  }
+
+  function createHutPlan(origin: Vec3): Vec3[] {
+    const plan: Vec3[] = [];
+    for (let x = -1; x <= 1; x += 1) {
+      for (let z = -1; z <= 1; z += 1) plan.push(origin.offset(x, 0, z));
+    }
+    for (const y of [1, 2]) {
+      for (let x = -1; x <= 1; x += 1) {
+        for (let z = -1; z <= 1; z += 1) {
+          const isWall = Math.abs(x) === 1 || Math.abs(z) === 1;
+          const isDoorway = x === -1 && z === 0;
+          if (isWall && !isDoorway) plan.push(origin.offset(x, y, z));
+        }
+      }
+    }
+    for (let x = -1; x <= 1; x += 1) {
+      for (let z = -1; z <= 1; z += 1) {
+        if (x !== 0 || z !== 0) plan.push(origin.offset(x, 3, z));
+      }
+    }
+    plan.push(origin.offset(0, 3, 0));
+    return plan;
   }
 
   const forward = input.source === 'minecraft'

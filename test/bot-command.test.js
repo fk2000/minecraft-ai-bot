@@ -8,6 +8,8 @@ test('bot commands are parsed into direct command routes', () => {
   assert.deepEqual(parseBotCommand('!come'), { type: 'come' });
   assert.deepEqual(parseBotCommand('!stop'), { type: 'stop' });
   assert.deepEqual(parseBotCommand('!build'), { type: 'build', trick: 'list' });
+  assert.deepEqual(parseBotCommand('!build hut'), { type: 'build', trick: 'hut' });
+  assert.deepEqual(parseBotCommand('!build 小屋'), { type: 'build', trick: 'hut' });
   assert.deepEqual(parseBotCommand('!build trick1'), { type: 'build', trick: 'trick1' });
   assert.deepEqual(parseBotCommand('!build イルミ'), { type: 'build', trick: 'trick1' });
   assert.deepEqual(parseBotCommand('!build 一覧'), { type: 'build', trick: 'list' });

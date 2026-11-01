@@ -49,6 +49,12 @@ test('parseBuildTrickArg returns null for unknown aliases', () => {
   assert.equal(parseBuildTrickArg('ランダム'), null);
 });
 
+test('parseBuildTrickArg returns hut for hut aliases', () => {
+  assert.equal(parseBuildTrickArg('hut'), 'hut');
+  assert.equal(parseBuildTrickArg('小屋'), 'hut');
+  assert.equal(parseBuildTrickArg('こや'), 'hut');
+});
+
 test('parseBotCommand parses build commands with trick arguments', () => {
   const cmd1 = parseBotCommand('!build trick1');
   assert.deepEqual(cmd1, { type: 'build', trick: 'trick1' });

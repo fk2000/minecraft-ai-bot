@@ -18,6 +18,11 @@ import {
   offsetPosition,
   getMaterialSource,
 } from './build-tricks.js';
+import {
+  placeBlockRobust,
+  verifyBlockPlaced,
+  formatPlacementError,
+} from './block-placer.js';
 
 export interface BuildExecutionContext {
   bot: Bot;
@@ -171,15 +176,36 @@ export async function executeBuildStep(
           return { success: true, message: `既に空洞: ${step.comment ?? ''}` };
         }
 
-        await bot.pathfinder.goto(new GoalNear(worldPos.x, worldPos.y, worldPos.z, 2));
+        const distance = bot.entity.position.distanceTo(worldPos);
+        if (distance > 4) {
+          try {
+            await bot.pathfinder.goto(new GoalNear(worldPos.x, worldPos.y, worldPos.z, 2));
+          } catch (error) {
+            console.warn(`[build-tricks] Could not pathfind to dig position:`, error);
+          }
+        }
         
         if (ctx.cancelled) return { success: false, message: 'キャンセル' };
 
-        const tool = findBestTool(bot, block);
+        const currentBlock = bot.blockAt(worldPos);
+        if (!currentBlock || currentBlock.name === 'air') {
+          return { success: true, message: `既に空洞: ${step.comment ?? ''}` };
+        }
+
+        const tool = findBestTool(bot, currentBlock);
         if (tool) await bot.equip(tool, 'hand');
 
-        await bot.dig(block);
-        return { success: true, message: `掘削完了: ${step.comment ?? ''}` };
+        try {
+          if (bot.canDigBlock(currentBlock)) {
+            await bot.dig(currentBlock);
+            return { success: true, message: `掘削完了: ${step.comment ?? ''}` };
+          } else {
+            return { success: false, message: `ブロックを掘れません（距離または権限）` };
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { success: false, message: `掘削エラー: ${message}` };
+        }
       }
 
       case 'place': {
@@ -193,26 +219,29 @@ export async function executeBuildStep(
           return { success: true, message: `既にブロックあり: ${existingBlock.name}` };
         }
 
-        await bot.pathfinder.goto(new GoalNear(worldPos.x, worldPos.y, worldPos.z, 3));
-        
         if (ctx.cancelled) return { success: false, message: 'キャンセル' };
 
-        const item = findItemInInventory(bot, step.block);
-        if (!item) {
-          return { success: false, message: `${step.block}がインベントリにありません` };
+        const result = await placeBlockRobust(bot, worldPos, step.block, {
+          GoalNear,
+          maxRetries: 3,
+          retryDelayMs: 300,
+          verifyDelayMs: 150,
+          maxPlacementDistance: 4.5,
+        });
+
+        if (result.success) {
+          return { success: true, message: `設置完了: ${step.block} ${step.comment ?? ''}` };
         }
 
-        await bot.equip(item, 'hand');
-
-        const referenceBlock = findPlacementReference(bot, worldPos);
-        if (!referenceBlock) {
-          return { success: false, message: '設置する足場が見つかりません' };
+        if (result.error) {
+          const errorMsg = formatPlacementError(result.error);
+          if (result.error.type === 'protection_likely') {
+            return { success: false, message: `保護エリア: ${errorMsg}` };
+          }
+          return { success: false, message: errorMsg };
         }
 
-        const faceVector = worldPos.minus(referenceBlock.position);
-        await bot.placeBlock(referenceBlock, faceVector);
-        
-        return { success: true, message: `設置完了: ${step.block} ${step.comment ?? ''}` };
+        return { success: false, message: `${step.block}の設置に失敗しました` };
       }
 
       case 'remove': {
@@ -221,12 +250,33 @@ export async function executeBuildStep(
           return { success: true, message: `既に除去済み: ${step.comment ?? ''}` };
         }
 
-        await bot.pathfinder.goto(new GoalNear(worldPos.x, worldPos.y, worldPos.z, 2));
+        const distance = bot.entity.position.distanceTo(worldPos);
+        if (distance > 4) {
+          try {
+            await bot.pathfinder.goto(new GoalNear(worldPos.x, worldPos.y, worldPos.z, 2));
+          } catch (error) {
+            console.warn(`[build-tricks] Could not pathfind to remove position:`, error);
+          }
+        }
         
         if (ctx.cancelled) return { success: false, message: 'キャンセル' };
 
-        await bot.dig(block);
-        return { success: true, message: `除去完了: ${step.comment ?? ''}` };
+        const currentBlock = bot.blockAt(worldPos);
+        if (!currentBlock || currentBlock.name === 'air') {
+          return { success: true, message: `既に除去済み: ${step.comment ?? ''}` };
+        }
+
+        try {
+          if (bot.canDigBlock(currentBlock)) {
+            await bot.dig(currentBlock);
+            return { success: true, message: `除去完了: ${step.comment ?? ''}` };
+          } else {
+            return { success: false, message: `ブロックを除去できません（距離または権限）` };
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { success: false, message: `除去エラー: ${message}` };
+        }
       }
 
       case 'spawn_entity': {
@@ -397,20 +447,6 @@ function findItemInInventory(
   );
   
   return partialMatch ?? null;
-}
-
-function findPlacementReference(bot: Bot, position: Vec3): MineflayerBlock | null {
-  const offsets = [
-    [0, -1, 0], [0, 0, -1], [0, 0, 1],
-    [-1, 0, 0], [1, 0, 0], [0, 1, 0]
-  ] as const;
-
-  for (const [x, y, z] of offsets) {
-    const block = bot.blockAt(position.offset(x, y, z));
-    if (block?.boundingBox === 'block') return block;
-  }
-
-  return null;
 }
 
 function sleep(ms: number): Promise<void> {
