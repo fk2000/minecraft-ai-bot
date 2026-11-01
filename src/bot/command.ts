@@ -1,15 +1,65 @@
+export type BuildTrickId = 'trick1' | 'trick2' | 'trick3' | 'trick4' | 'trick5';
+
 export type BotCommand =
   | { type: 'help' }
   | { type: 'ping' }
   | { type: 'come' }
   | { type: 'stop' }
-  | { type: 'build' }
+  | { type: 'build'; trick: BuildTrickId | 'list' | null }
   | { type: 'goals' }
   | { type: 'goal'; choice: 'survive' | 'socialize' | 'explore' | 'observe' | 'rest' | null }
   | { type: 'hold'; query: string }
   | { type: 'weather'; value: string | null }
   | { type: 'difficulty'; value: string | null }
   | { type: 'unsupported'; name: string };
+
+const buildTrickAliases: Record<string, BuildTrickId> = {
+  'trick1': 'trick1',
+  '1': 'trick1',
+  'トリック1': 'trick1',
+  'イルミ': 'trick1',
+  'イルミネーション': 'trick1',
+  '電飾': 'trick1',
+  'stringlights': 'trick1',
+  
+  'trick2': 'trick2',
+  '2': 'trick2',
+  'トリック2': 'trick2',
+  '花': 'trick2',
+  '植物': 'trick2',
+  '葉っぱ花': 'trick2',
+  'flower': 'trick2',
+  
+  'trick3': 'trick3',
+  '3': 'trick3',
+  'トリック3': 'trick3',
+  '窓': 'trick3',
+  '屋根': 'trick3',
+  'window': 'trick3',
+  
+  'trick4': 'trick4',
+  '4': 'trick4',
+  'トリック4': 'trick4',
+  'アーチ': 'trick4',
+  '門': 'trick4',
+  'arch': 'trick4',
+  
+  'trick5': 'trick5',
+  '5': 'trick5',
+  'トリック5': 'trick5',
+  '道': 'trick5',
+  '光る道': 'trick5',
+  'path': 'trick5',
+  'redpath': 'trick5',
+};
+
+export function parseBuildTrickArg(arg: string): BuildTrickId | 'list' | null {
+  const normalized = arg.trim().toLowerCase();
+  if (normalized === '' || normalized === 'list' || normalized === '一覧' || normalized === 'help') {
+    return 'list';
+  }
+  return buildTrickAliases[normalized] ?? null;
+}
 
 const goalChoices: Record<string, Extract<BotCommand, { type: 'goal' }>['choice']> = {
   survive: 'survive',
@@ -40,7 +90,7 @@ export function parseBotCommand(message: string): BotCommand | null {
     case 'stop':
       return { type: 'stop' };
     case 'build':
-      return { type: 'build' };
+      return { type: 'build', trick: parseBuildTrickArg(argument) };
     case 'goals':
       return { type: 'goals' };
     case 'goal':

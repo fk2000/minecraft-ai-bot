@@ -22,10 +22,20 @@ import {
   shouldInterruptMovementForBedSleep,
   shouldPreferBedSleepOverMovement
 } from './behavior.js';
-import { parseBotCommand } from './command.js';
+import { parseBotCommand, type BuildTrickId } from './command.js';
 import { startHealthServer } from './health.js';
 import { parseJevCommand } from './jev-command.js';
 import { parseDifficultyCommand, parseWeatherCommand } from './world-command.js';
+import {
+  getTrickById,
+  TRICK_BLUEPRINTS,
+  checkMaterials,
+  formatMaterialRequest,
+} from './build-tricks.js';
+import {
+  executeBuildTrick,
+  type BuildExecutionContext,
+} from './build-tricks-executor.js';
 
 type ChatSource = 'minecraft' | 'discord';
 
@@ -67,7 +77,7 @@ const discordLogChannelId = process.env.DISCORD_LOG_CHANNEL_ID?.trim();
 const rulesText = process.env.SERVER_RULES_TEXT?.trim() ||
   'ルール: 荒らし禁止・他プレイヤーへの迷惑行為禁止です。';
 const commandHelpText =
-  '使えるコマンド: !help, !ping, !come, !stop, !build, !goals, !goal [survive|socialize|explore|observe|rest], !hold [アイテム名], !weather [clear|rain|thunder], !difficulty [peaceful|easy|normal|hard]';
+  '使えるコマンド: !help, !ping, !come, !stop, !build [trick1-5|一覧], !goals, !goal [survive|socialize|explore|observe|rest], !hold [アイテム名], !weather [clear|rain|thunder], !difficulty [peaceful|easy|normal|hard]';
 const developerUsernames = (process.env.DEVELOPER_USERNAMES ?? '.fujiwarakaz,fujiwarakaz')
   .split(',')
   .map((username) => username.trim().toLowerCase())
@@ -339,7 +349,21 @@ async function relay(input: ChatInput): Promise<void> {
         await input.reply('いま別の行動を進めているよ。終わったらまたお願いね。');
         return;
       }
-      await buildHut(input, bot);
+      
+      if (command.trick === null) {
+        await input.reply('使い方: !build [trick1-5|一覧] 例: !build trick1, !build イルミ');
+        return;
+      }
+      
+      if (command.trick === 'list') {
+        const trickList = TRICK_BLUEPRINTS.map(t => 
+          `  ${t.id}: ${t.nameJa} (${t.name})`
+        ).join('\n');
+        await input.reply(`建築トリック一覧:\n${trickList}\n使い方: !build trick1`);
+        return;
+      }
+      
+      await buildTrick(input, bot, command.trick);
       return;
     }
     if (command.type === 'hold') {
@@ -473,54 +497,81 @@ async function relay(input: ChatInput): Promise<void> {
     }
   }
 
-  async function buildHut(input: ChatInput, bot: Bot): Promise<void> {
+  async function buildTrick(input: ChatInput, bot: Bot, trickId: BuildTrickId): Promise<void> {
     if (activeBuild) {
       await input.reply('もう建築中だよ。');
+      return;
+    }
+
+    const blueprint = getTrickById(trickId);
+    if (!blueprint) {
+      await input.reply(`${trickId}は見つからないよ。!build 一覧 で確認してね。`);
       return;
     }
 
     const build = { cancelled: false };
     activeBuild = build;
     autonomyRunning = true;
+
     try {
       const origin = bot.entity.position.floored().offset(2, 0, 0);
-      const plan = createHutPlan(origin);
-      const planks = bot.inventory.items().filter((item) => item.name.endsWith('_planks'));
-      const available = planks.reduce((total, item) => total + item.count, 0);
-      if (available < plan.length) {
-        await input.reply(`板材があと${plan.length - available}個足りないよ！`);
-        return;
+      
+      const inventoryItems = bot.inventory.items().map(item => ({
+        name: item.name,
+        count: item.count,
+      }));
+      const materialCheck = checkMaterials(blueprint, inventoryItems);
+      
+      const craftedMissing = materialCheck.missing.filter(m => m.source === 'crafted');
+      const naturalMissing = materialCheck.missing.filter(m => m.source === 'natural');
+      
+      let statusMessage = `${blueprint.nameJa}を建築するよ。止めるときは !stop を使ってね。`;
+      
+      if (naturalMissing.length > 0) {
+        statusMessage += `\n採集が必要: ${naturalMissing.map(m => `${m.displayName}${m.needed - m.have}個`).join('、')}`;
       }
+      
+      if (craftedMissing.length > 0) {
+        statusMessage += `\nプレイヤーからのアイテム提供が必要です。`;
+      }
+      
+      await input.reply(statusMessage);
 
-      for (const position of plan) {
-        const block = bot.blockAt(position);
-        if (!block || block.boundingBox !== 'empty') {
-          await input.reply('建築場所に障害物があるみたい。場所を空けてから試してね。');
-          return;
-        }
-      }
-      for (const position of plan.slice(0, 9)) {
-        const ground = bot.blockAt(position.offset(0, -1, 0));
-        if (ground?.boundingBox !== 'block') {
-          await input.reply('地面が平らでないか、足場がないみたい。');
-          return;
-        }
-      }
+      const ctx: BuildExecutionContext = {
+        bot,
+        GoalNear: goals.GoalNear,
+        origin,
+        blueprint,
+        cancelled: false,
+        chatMessage: (text: string) => {
+          if (minecraftBot === bot && !bot._client.ended) {
+            bot.chat(formatMinecraftText(text));
+          }
+        },
+        onProgress: (message: string) => {
+          console.info(`[build-tricks] ${message}`);
+        },
+      };
 
-      await input.reply('近くに小さな木の小屋を建てるよ。止めるときは !stop を使ってね。');
-      for (const position of plan) {
-        if (build.cancelled || minecraftBot !== bot || bot._client.ended) return;
-        const plank = bot.inventory.items().find((item) => item.name.endsWith('_planks'));
-        const reference = findPlacementReference(bot, position);
-        if (!plank || !reference) throw new Error('No plank or supporting block available');
-        await bot.equip(plank, 'hand');
-        await bot.placeBlock(reference, position.minus(reference.position));
-      }
-      if (!build.cancelled && minecraftBot === bot && !bot._client.ended) {
-        await input.reply('小屋が完成したよ！');
+      Object.defineProperty(ctx, 'cancelled', {
+        get: () => build.cancelled,
+      });
+
+      const result = await executeBuildTrick(ctx);
+
+      if (minecraftBot === bot && !bot._client.ended) {
+        if (result.success) {
+          let completionMessage = result.message;
+          if (blueprint.limitations && blueprint.limitations.length > 0) {
+            completionMessage += `\n注意: ${blueprint.limitations[0]}`;
+          }
+          await input.reply(completionMessage);
+        } else {
+          await input.reply(`建築が完了できなかったよ: ${result.message}`);
+        }
       }
     } catch (error) {
-      console.error('[command] Hut building failed:', error);
+      console.error(`[command] Build trick ${trickId} failed:`, error);
       if (minecraftBot === bot && !bot._client.ended) {
         await input.reply('建築に失敗したよ。足場や設置できる場所を確認してね。');
       }
@@ -528,41 +579,6 @@ async function relay(input: ChatInput): Promise<void> {
       if (activeBuild === build) activeBuild = undefined;
       autonomyRunning = false;
     }
-  }
-
-  function createHutPlan(origin: Vec3): Vec3[] {
-    const plan: Vec3[] = [];
-    for (let x = -1; x <= 1; x += 1) {
-      for (let z = -1; z <= 1; z += 1) plan.push(origin.offset(x, 0, z));
-    }
-    for (const y of [1, 2]) {
-      for (let x = -1; x <= 1; x += 1) {
-        for (let z = -1; z <= 1; z += 1) {
-          const isWall = Math.abs(x) === 1 || Math.abs(z) === 1;
-          const isDoorway = x === -1 && z === 0;
-          if (isWall && !isDoorway) plan.push(origin.offset(x, y, z));
-        }
-      }
-    }
-    for (let x = -1; x <= 1; x += 1) {
-      for (let z = -1; z <= 1; z += 1) {
-        if (x !== 0 || z !== 0) plan.push(origin.offset(x, 3, z));
-      }
-    }
-    plan.push(origin.offset(0, 3, 0));
-    return plan;
-  }
-
-  function findPlacementReference(bot: Bot, position: Vec3) {
-    const offsets = [
-      [0, -1, 0], [0, 0, -1], [0, 0, 1],
-      [-1, 0, 0], [1, 0, 0], [0, 1, 0]
-    ] as const;
-    for (const [x, y, z] of offsets) {
-      const block = bot.blockAt(position.offset(x, y, z));
-      if (block?.boundingBox === 'block') return block;
-    }
-    return null;
   }
 
   const forward = input.source === 'minecraft'
