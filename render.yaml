@@ -31,6 +31,16 @@ services:
         sync: false
       - key: MC_VERSION
         sync: false
+      - key: MC_PROFILES_JSON
+        sync: false
+      - key: MC_DEFAULT_PROFILE
+        sync: false
+      - key: MC_INVENTORY_SHARED
+        sync: false
+      - key: CONTROL_URL
+        sync: false
+      - key: CONTROL_TOKEN
+        sync: false
       # Non-secret defaults. Render's disk is ephemeral, so use /tmp.
       - key: PORT
         value: "10000"

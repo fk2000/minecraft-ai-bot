@@ -12,6 +12,8 @@ export type BotCommand =
   | { type: 'hold'; query: string }
   | { type: 'weather'; value: string | null }
   | { type: 'difficulty'; value: string | null }
+  | { type: 'server'; action: 'list' | 'use'; name?: string }
+  | { type: 'chest'; action: 'take' | 'put'; item?: string; count?: number; x?: number; y?: number; z?: number }
   | { type: 'unsupported'; name: string };
 
 const buildTrickAliases: Record<string, BuildTrickId> = {
@@ -78,6 +80,41 @@ const goalChoices: Record<string, Extract<BotCommand, { type: 'goal' }>['choice'
   待機: 'rest'
 };
 
+function parseChestCommand(argument: string): Extract<BotCommand, { type: 'chest' }> | null {
+  const parts = argument.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return null;
+  const action = parts[0].toLowerCase();
+  if (action === 'take') {
+    if (parts.length < 6) return { type: 'chest', action: 'take' };
+    const count = Number(parts[parts.length - 4]);
+    const x = Number(parts[parts.length - 3]);
+    const y = Number(parts[parts.length - 2]);
+    const z = Number(parts[parts.length - 1]);
+    const item = parts.slice(1, -4).join(' ');
+    return { type: 'chest', action: 'take', item, count, x, y, z };
+  }
+  if (action === 'put') {
+    if (parts.length < 4) return { type: 'chest', action: 'put' };
+    const x = Number(parts[parts.length - 3]);
+    const y = Number(parts[parts.length - 2]);
+    const z = Number(parts[parts.length - 1]);
+    return { type: 'chest', action: 'put', x, y, z };
+  }
+  return null;
+}
+
+function parseServerCommand(argument: string): Extract<BotCommand, { type: 'server' }> | null {
+  const parts = argument.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return null;
+  const action = parts[0].toLowerCase();
+  if (action === 'list') return { type: 'server', action: 'list' };
+  if (action === 'use') {
+    const name = parts.slice(1).join(' ').trim();
+    return { type: 'server', action: 'use', name: name || undefined };
+  }
+  return null;
+}
+
 export function parseBotCommand(message: string): BotCommand | null {
   const match = /^!(\S+)(?:\s+([\s\S]*))?$/.exec(message.trim());
   if (!match) return null;
@@ -105,7 +142,15 @@ export function parseBotCommand(message: string): BotCommand | null {
       return { type: 'weather', value: argument ? argument.toLowerCase() : null };
     case 'difficulty':
       return { type: 'difficulty', value: argument ? argument.toLowerCase() : null };
+    case 'server':
+      return parseServerCommand(argument) ?? { type: 'unsupported', name: 'server' };
+    case 'chest':
+      return parseChestCommand(argument) ?? { type: 'unsupported', name: 'chest' };
     default:
       return { type: 'unsupported', name: match[1] };
   }
+}
+
+export function isDeveloperChestOrServerCommand(command: BotCommand): boolean {
+  return command.type === 'server' || command.type === 'chest';
 }

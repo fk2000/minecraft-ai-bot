@@ -1,0 +1,13 @@
+name = "minecraft-ai-bot-control"
+main = "src/index.ts"
+compatibility_date = "2025-03-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "CONTROL_DB"
+database_name = "minecraft-ai-bot-control"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "./migrations"
+
+[vars]
+# Set CONTROL_API_TOKEN as a secret in the Cloudflare dashboard (never commit).

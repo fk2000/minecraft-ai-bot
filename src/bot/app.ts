@@ -22,7 +22,10 @@ import {
   shouldInterruptMovementForBedSleep,
   shouldPreferBedSleepOverMovement
 } from './behavior.js';
+import { chestPut, chestTake } from './chest-ops.js';
+import { startControlJobPoller } from './control-jobs.js';
 import { parseBotCommand, type BuildTrickId } from './command.js';
+import { listProfileNames, loadMcProfiles, type McProfile } from './profiles.js';
 import { startHealthServer } from './health.js';
 import { parseJevCommand } from './jev-command.js';
 import { parseDifficultyCommand, parseWeatherCommand } from './world-command.js';
@@ -60,12 +63,14 @@ interface ConversationTurn {
 if (!process.env.JEV_API_KEY?.trim()) throw new Error('JEV_API_KEY is required');
 
 const jevEnv = { JEV_API_KEY: process.env.JEV_API_KEY };
-const minecraftHost = (process.env.MC_SERVER_HOST ?? process.env.MC_HOST ?? '').trim();
-if (!minecraftHost) throw new Error('MC_SERVER_HOST (or legacy MC_HOST) is required');
-const minecraftPort = readPort(process.env.MC_SERVER_PORT ?? process.env.MC_PORT);
-const minecraftUsername = process.env.MC_USERNAME?.trim() || 'JevAIBot';
-const minecraftAuth = readMinecraftAuth(process.env.MC_AUTH);
+const { profiles: mcProfiles, defaultProfileName } = loadMcProfiles();
+let activeProfileName = defaultProfileName;
+const initialProfile = mcProfiles.get(activeProfileName);
+if (!initialProfile) throw new Error(`Default profile "${defaultProfileName}" is missing`);
+let activeProfile: McProfile = initialProfile;
 const minecraftAuthCacheDir = process.env.MC_AUTH_CACHE_DIR?.trim() || './.minecraft-auth';
+const controlUrl = process.env.CONTROL_URL?.trim();
+const controlToken = process.env.CONTROL_TOKEN?.trim();
 const jevDailyLimit = readPositiveInteger(process.env.JEV_DAILY_LIMIT, 3, 'JEV_DAILY_LIMIT');
 const jevDailyQuota = new JevDailyQuota(
   process.env.JEV_USAGE_STATE_PATH?.trim() || join(minecraftAuthCacheDir, 'jev-daily-usage.json')
@@ -83,7 +88,7 @@ const discordLogChannelId = process.env.DISCORD_LOG_CHANNEL_ID?.trim();
 const rulesText = process.env.SERVER_RULES_TEXT?.trim() ||
   'ルール: 荒らし禁止・他プレイヤーへの迷惑行為禁止です。';
 const commandHelpText =
-  '使えるコマンド: !help, !ping, !come, !stop, !build [trick1-5|一覧], !goals, !goal [survive|socialize|explore|observe|rest], !hold [アイテム名], !weather [clear|rain|thunder], !difficulty [peaceful|easy|normal|hard]';
+  '使えるコマンド: !help, !ping, !come, !stop, !build [trick1-5|一覧], !goals, !goal [survive|socialize|explore|observe|rest], !hold [アイテム名], !weather [clear|rain|thunder], !difficulty [peaceful|easy|normal|hard], !server list|use <name>, !chest take|put (開発者のみ)';
 const developerUsernames = (process.env.DEVELOPER_USERNAMES ?? '.fujiwarakaz,fujiwarakaz')
   .split(',')
   .map((username) => username.trim().toLowerCase())
@@ -137,6 +142,8 @@ let autonomyRunning = false;
 let autonomyGeneration = 0;
 let playerDirectedMovement = false;
 let activeBuild: { cancelled: boolean } | undefined;
+let suppressAutoReconnect = false;
+let stopControlPoller: (() => void) | undefined;
 
 function readPort(value: string | undefined): number {
   const port = Number(value ?? '25565');
@@ -155,12 +162,12 @@ function readPositiveInteger(value: string | undefined, fallback: number, name: 
   return parsed;
 }
 
-function readMinecraftAuth(value: string | undefined): 'offline' | 'microsoft' | 'mojang' {
-  const auth = value?.trim() || 'offline';
-  if (auth !== 'offline' && auth !== 'microsoft' && auth !== 'mojang') {
-    throw new Error('MC_AUTH must be one of: offline, microsoft, mojang');
-  }
-  return auth;
+function getActiveProfile(): McProfile {
+  return activeProfile;
+}
+
+function getMinecraftUsername(): string {
+  return getActiveProfile().username;
 }
 
 function describeReason(reason: unknown): string {
@@ -190,7 +197,7 @@ function formatMinecraftText(text: string): string {
 
 function isMentionedInMinecraft(message: string): boolean {
   const normalized = message.toLowerCase();
-  const names = [minecraftUsername.toLowerCase(), 'steve', 'スティーブ'];
+  const names = [getMinecraftUsername().toLowerCase(), 'steve', 'スティーブ'];
   return names.some((name) => {
     if (!name) return false;
     if (/^[a-z0-9_]+$/i.test(name)) {
@@ -223,7 +230,7 @@ function logMinecraftConnectionEvent(event: string, reason: unknown, sendToDisco
 
   void postToDiscordChannel(
     discordLogChannelId,
-    `Minecraft ${event} (${minecraftHost}:${minecraftPort}): ${details}`
+    `Minecraft ${event} (${getActiveProfile().host}:${getActiveProfile().port}): ${details}`
   ).catch((error: unknown) => {
     console.error('[discord] Failed to post Minecraft connection log:', error);
   });
@@ -331,6 +338,37 @@ async function relay(input: ChatInput): Promise<void> {
       return;
     }
 
+    if (command.type === 'server' || command.type === 'chest') {
+      if (!developerUsernames.includes(input.username.trim().toLowerCase())) {
+        await input.reply('server / chest コマンドは開発者だけが実行できるよ。');
+        return;
+      }
+    }
+
+    if (command.type === 'server') {
+      if (command.action === 'list') {
+        const names = listProfileNames(mcProfiles);
+        await input.reply(`サーバー: ${names.join(', ')}（現在: ${activeProfileName}）`);
+        return;
+      }
+      if (!command.name) {
+        await input.reply('使い方: !server use <name>');
+        return;
+      }
+      if (!mcProfiles.has(command.name)) {
+        await input.reply(`"${command.name}" というプロファイルは見つからないよ。!server list で一覧を確認してね。`);
+        return;
+      }
+      try {
+        await switchServer(command.name);
+        await input.reply(`${command.name} に接続し直したよ。`);
+      } catch (error) {
+        console.error('[command] server switch failed:', error);
+        await input.reply('サーバー切り替えに失敗したよ。');
+      }
+      return;
+    }
+
     const bot = minecraftBot;
     if (!bot || bot._client.ended || !bot.entity?.position) {
       await input.reply('Minecraftサーバーに接続していないので、コマンドを実行できないよ。');
@@ -340,6 +378,43 @@ async function relay(input: ChatInput): Promise<void> {
     if (command.type === 'come') {
       await moveToRequestingPlayer(input, bot);
       return;
+    }
+    if (command.type === 'chest') {
+      if (command.action === 'take') {
+        const { item, count, x, y, z } = command;
+        if (!item || count == null || x == null || y == null || z == null ||
+            !Number.isInteger(count) || count <= 0 ||
+            !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+          await input.reply('使い方: !chest take <item> <count> <x> <y> <z>');
+          return;
+        }
+        try {
+          const result = await chestTake(bot, item, count, x, y, z);
+          await input.reply(
+            `${result.itemName}: ${result.moved}/${result.requested} 個をチェストから取ったよ。`
+          );
+        } catch (error) {
+          console.error('[command] chest take failed:', error);
+          await input.reply('チェストから取り出せなかったよ。');
+        }
+        return;
+      }
+      if (command.action === 'put') {
+        const { x, y, z } = command;
+        if (x == null || y == null || z == null ||
+            !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+          await input.reply('使い方: !chest put <x> <y> <z>');
+          return;
+        }
+        try {
+          const result = await chestPut(bot, x, y, z);
+          await input.reply(`チェストへ合計 ${result.totalMoved} 個を預けたよ。`);
+        } catch (error) {
+          console.error('[command] chest put failed:', error);
+          await input.reply('チェストに預けられなかったよ。');
+        }
+        return;
+      }
     }
     if (command.type === 'stop') {
       if (activeBuild) activeBuild.cancelled = true;
@@ -867,16 +942,17 @@ async function relay(input: ChatInput): Promise<void> {
   }
 }
 
-async function checkMinecraftOnline(): Promise<boolean> {
+async function checkMinecraftOnline(profile: McProfile = getActiveProfile()): Promise<boolean> {
   try {
+    const version = profile.version ?? process.env.MC_VERSION;
     await pingMinecraftServer({
-      host: minecraftHost,
-      port: minecraftPort,
-      ...(process.env.MC_VERSION ? { version: process.env.MC_VERSION } : {}),
+      host: profile.host,
+      port: profile.port,
+      ...(version ? { version } : {}),
       closeTimeout: minecraftPingTimeoutMs,
       noPongTimeout: minecraftPingTimeoutMs
     });
-    console.info(`[minecraft] TCP status ping succeeded for ${minecraftHost}:${minecraftPort}`);
+    console.info(`[minecraft] TCP status ping succeeded for ${profile.host}:${profile.port}`);
     return true;
   } catch (error) {
     console.info(`[minecraft] Server is offline or unreachable: ${describeReason(error)}`);
@@ -1323,7 +1399,7 @@ async function runAutonomyCycle(bot: Bot): Promise<void> {
 }
 
 function scheduleMinecraftReconnect(reason: unknown, delayMs?: number): void {
-  if (shuttingDown || reconnectTimer || isConnecting || minecraftBot) return;
+  if (shuttingDown || suppressAutoReconnect || reconnectTimer || isConnecting || minecraftBot) return;
 
   isReconnecting = true;
   const nextAttempt = reconnectAttempts + 1;
@@ -1350,7 +1426,7 @@ function scheduleMinecraftReconnect(reason: unknown, delayMs?: number): void {
       }
 
       isReconnecting = false;
-      createMinecraftBot();
+      connect(getActiveProfile());
     })().catch((error: unknown) => {
       logMinecraftConnectionEvent('health check failed', error);
       scheduleMinecraftReconnect(error);
@@ -1378,12 +1454,9 @@ function disconnectMineflayerBot(bot: Bot, reason: unknown, event: 'kicked' | 'e
   bot.removeListener('error', onError);
 
   logMinecraftConnectionEvent(event, reason);
-  try {
-    if (!bot._client.ended) bot.quit(`Reconnect after ${event}`);
-  } catch (error) {
-    console.error('[minecraft] Failed to close disconnected bot cleanly:', error);
+  if (!suppressAutoReconnect) {
+    scheduleMinecraftReconnect(`${event}: ${describeReason(reason)}`);
   }
-  scheduleMinecraftReconnect(`${event}: ${describeReason(reason)}`);
 }
 
 let activeMinecraftListeners: {
@@ -1472,29 +1545,7 @@ function onError(error: Error): void {
   else logMinecraftConnectionEvent('error', error);
 }
 
-function createMinecraftBot(): void {
-  if (shuttingDown || isConnecting || isReconnecting || minecraftBot) return;
-  isConnecting = true;
-  let bot: Bot;
-  try {
-    bot = mineflayer.createBot({
-      host: minecraftHost,
-      port: minecraftPort,
-      username: minecraftUsername,
-      auth: minecraftAuth,
-      profilesFolder: minecraftAuthCacheDir,
-      ...(process.env.MC_VERSION ? { version: process.env.MC_VERSION } : {}),
-      logErrors: false
-    });
-  } catch (error) {
-    isConnecting = false;
-    logMinecraftConnectionEvent('failed to create bot', error);
-    scheduleMinecraftReconnect(error);
-    return;
-  }
-
-  isConnecting = false;
-  minecraftBot = bot;
+function attachBotListeners(bot: Bot): void {
   bot.loadPlugin(pathfinder);
   activeMinecraftListeners = { bot, onSpawn, onPlayerJoined, onChat, onKicked, onEnd, onError };
   bot.on('spawn', onSpawn);
@@ -1503,6 +1554,104 @@ function createMinecraftBot(): void {
   bot.on('kicked', onKicked);
   bot.on('end', onEnd);
   bot.on('error', onError);
+}
+
+function connect(profile: McProfile = getActiveProfile()): void {
+  if (shuttingDown || isConnecting || isReconnecting || minecraftBot) return;
+  isConnecting = true;
+  let bot: Bot;
+  try {
+    const version = profile.version ?? process.env.MC_VERSION;
+    bot = mineflayer.createBot({
+      host: profile.host,
+      port: profile.port,
+      username: profile.username,
+      auth: profile.auth,
+      profilesFolder: minecraftAuthCacheDir,
+      ...(version ? { version } : {}),
+      logErrors: false
+    });
+  } catch (error) {
+    isConnecting = false;
+    logMinecraftConnectionEvent('failed to create bot', error);
+    if (!suppressAutoReconnect) scheduleMinecraftReconnect(error);
+    return;
+  }
+
+  isConnecting = false;
+  minecraftBot = bot;
+  attachBotListeners(bot);
+  console.info(JSON.stringify({
+    event: 'minecraft.connect',
+    profile: profile.name,
+    host: profile.host,
+    port: profile.port
+  }));
+}
+
+function waitForBotSpawn(bot: Bot, timeoutMs = 120_000): Promise<void> {
+  if (bot.entity?.position) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onReady = (): void => {
+      clearTimeout(timer);
+      bot.removeListener('spawn', onReady);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      bot.removeListener('spawn', onReady);
+      reject(new Error('timed out waiting for spawn'));
+    }, timeoutMs);
+    bot.once('spawn', onReady);
+  });
+}
+
+async function teardownBotForSwitch(bot: Bot): Promise<void> {
+  suppressAutoReconnect = true;
+  clearReconnectTimer();
+  isReconnecting = false;
+  clearAutonomyTimer();
+  clearNightSleepCheckTimer();
+  autonomyRunning = false;
+  bot.pathfinder?.setGoal(null);
+  await new Promise<void>((resolve) => {
+    bot.once('end', () => resolve());
+    try {
+      bot.quit('switch server');
+    } catch {
+      resolve();
+    }
+  });
+  if (minecraftBot === bot) {
+    minecraftBot = undefined;
+  }
+  if (activeMinecraftListeners?.bot === bot) activeMinecraftListeners = undefined;
+  bot.removeListener('spawn', onSpawn);
+  bot.removeListener('playerJoined', onPlayerJoined);
+  bot.removeListener('chat', onChat);
+  bot.removeListener('kicked', onKicked);
+  bot.removeListener('end', onEnd);
+  bot.removeListener('error', onError);
+}
+
+async function switchServer(name: string): Promise<void> {
+  const profile = mcProfiles.get(name);
+  if (!profile) throw new Error(`unknown profile "${name}"`);
+  if (name === activeProfileName && minecraftBot && !minecraftBot._client.ended) {
+    return;
+  }
+
+  const existing = minecraftBot;
+  if (existing && !existing._client.ended) {
+    await teardownBotForSwitch(existing);
+  }
+
+  activeProfileName = name;
+  activeProfile = profile;
+  suppressAutoReconnect = false;
+  connect(profile);
+  const bot = minecraftBot;
+  if (!bot) throw new Error('failed to start connection');
+  await waitForBotSpawn(bot);
 }
 
 async function handleDiscordMessage(message: Message): Promise<void> {
@@ -1536,13 +1685,30 @@ async function start(): Promise<void> {
     console.warn('[discord] DISCORD_TOKEN is unset; Discord integration is disabled');
   }
 
-  createMinecraftBot();
+  connect(getActiveProfile());
+
+  if (controlUrl && controlToken) {
+    stopControlPoller = startControlJobPoller(
+      { baseUrl: controlUrl, token: controlToken },
+      {
+        getBot: () => minecraftBot,
+        getCurrentProfileName: () => activeProfileName,
+        switchServer,
+        getProfile: (profileName) => mcProfiles.get(profileName)
+      }
+    );
+    console.info('[control] Job poller started (15s interval)');
+  } else if (controlUrl || controlToken) {
+    console.warn('[control] CONTROL_URL and CONTROL_TOKEN must both be set; job poller disabled');
+  }
 }
 
 function shutdown(signal: NodeJS.Signals): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.info(`[process] Received ${signal}; shutting down`);
+  stopControlPoller?.();
+  stopControlPoller = undefined;
   clearReconnectTimer();
   clearAutonomyTimer();
   clearNightSleepCheckTimer();

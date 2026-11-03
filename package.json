@@ -10,7 +10,8 @@
     "test": "npm run build:container && node --test",
     "worker:dev": "wrangler dev",
     "worker:deploy": "wrangler deploy",
-    "worker:typecheck": "tsc --project tsconfig.worker.json"
+    "worker:typecheck": "tsc --project tsconfig.worker.json",
+    "control:typecheck": "tsc --project control/tsconfig.json"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",

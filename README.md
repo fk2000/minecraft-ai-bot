@@ -90,8 +90,45 @@ Gemini会話には`GEMINI_API_KEY`、Discord連携には`DISCORD_TOKEN`と`DISCO
 | `!hold [アイテム名]` | 所持アイテムを手に持つ |
 | `!weather clear\|rain\|thunder` | 開発者アカウントのみ。天気を変更 |
 | `!difficulty peaceful\|easy\|normal\|hard` | 開発者アカウントのみ。難易度を変更 |
+| `!server list` | 開発者のみ。`MC_PROFILES_JSON` のプロファイル名一覧 |
+| `!server use <name>` | 開発者のみ。自動再接続を一時停止し、指定プロファイルへ切り替え |
+| `!chest take <item> <count> <x> <y> <z>` | 開発者のみ。Pathfinderでチェストへ移動し withdraw |
+| `!chest put <x> <y> <z>` | 開発者のみ。所持アイテムをチェストへ deposit |
 
-### 建築トリック (`!build`)
+### マルチサーバー（`MC_PROFILES_JSON`）
+
+コンテナ版（`src/bot/app.ts`）は接続先を **プロファイル** で管理します。
+
+- `MC_PROFILES_JSON`: `[{ "name", "host", "port", "username", "auth", "version", "inventoryShared" }]` の JSON 配列
+- 未設定時は従来の `MC_SERVER_HOST` / `MC_SERVER_PORT` / `MC_USERNAME` / `MC_AUTH` がプロファイル名 **`default`** になります
+- `MC_DEFAULT_PROFILE` で起動時プロファイルを指定（既定 `default`、存在しない場合は配列先頭）
+- `connect(profile)` で Mineflayer を起動し、`switchServer(name)` は自動再接続を止めて `quit` → `end` → 新プロファイルで `spawn` まで待ちます
+
+**インベントリ共有について:** バニラの別サーバー間では Bot のインベントリを物理的に運べません。`inventoryShared: false` のルートでは Control ジョブはソース側の withdraw まで記録し、ステータス `failed` と `failure_reason: needs_shared_inventory` で終了します（成功扱いしません）。Proxy/Bungee 等でインベントリが共有される構成では、両プロファイル（または `routes` テーブル）で `inventoryShared: true` にすると deposit まで実行します。
+
+### Control Worker（`control/`）
+
+チェスト転送ジョブ用の Cloudflare Worker（D1）です。Bot は `CONTROL_URL` と `CONTROL_TOKEN` が両方設定されているとき **15 秒ごと** にポーリングします。
+
+| API | 説明 |
+| --- | --- |
+| `POST /jobs` | ジョブ作成（Bearer `CONTROL_API_TOKEN`） |
+| `GET /jobs/next` | 実行可能ジョブを claim |
+| `PATCH /jobs/:id` | ステータス・`moved_json`・`failure_reason` 更新 |
+
+D1 テーブル: `servers`, `accounts`, `routes`, `jobs`（`status`: `queued` → `withdrawing` → `in_transit` → `depositing` → `done` / `failed`）。**Microsoft トークン等は D1 に保存しません**（`accounts` は username/auth のみ）。
+
+```sh
+cd control
+npx wrangler d1 create minecraft-ai-bot-control   # database_id を wrangler.toml へ
+npx wrangler d1 migrations apply minecraft-ai-bot-control --remote
+npx wrangler secret put CONTROL_API_TOKEN
+npm run control:typecheck
+# npx wrangler deploy  # 本 PR ではデプロイしない
+```
+
+Bot 側は Render 等で `CONTROL_URL=https://<worker>.workers.dev` と `CONTROL_TOKEN=<same as CONTROL_API_TOKEN>` を設定します。
+
 
 YouTube Short「マイクラの天才だけが知ってる建築の裏技5選」（すずきくん）を再現する5つの建築トリックを実装しています。
 
@@ -196,20 +233,23 @@ WorkerはMineflayer Botとは別に動作します。30分ごとにMinecraft Jav
 ```sh
 npm test
 npm run worker:typecheck
+npm run control:typecheck
 ```
 
-コマンド解析、行動ロジック、Jevの日次上限などのテストを実行します。
+コマンド解析、プロファイル読み込み、ジョブ状態遷移、行動ロジック、Jevの日次上限などのテストを実行します。
 
 ## リポジトリ構成
 
 ```text
 src/
-  bot/       Mineflayer・DiscordコンテナBot
+  bot/       Mineflayer・DiscordコンテナBot（マルチプロファイル・チェスト・Control ポーリング）
   jev/       Jev APIクライアント、判定、日次上限
   mc/        Minecraft状態確認
   index.ts   Cloudflare Workerエントリーポイント
+control/     チェスト転送ジョブ Control Worker（D1）
+keepalive/   Render 無料枠向け /healthz キープアウェイク
 Dockerfile   コンテナビルド
-wrangler.toml Cloudflare Worker設定
+wrangler.toml Cloudflare Worker設定（サーバー監視）
 ```
 
 ## 貢献・サポート

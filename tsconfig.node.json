@@ -10,5 +10,11 @@
     "skipLibCheck": true,
     "esModuleInterop": true
   },
-  "include": ["src/bot/app.ts", "src/jev/client.ts", "src/jev/evaluator.ts"]
+  "include": [
+    "src/bot/**/*.ts",
+    "src/jev/client.ts",
+    "src/jev/evaluator.ts",
+    "src/jev/daily-quota.ts"
+  ],
+  "exclude": ["src/bot/state.ts"]
 }
