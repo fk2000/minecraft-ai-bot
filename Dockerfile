@@ -1,4 +1,4 @@
-FROM node:22.23.4-alpine AS builder
+FROM node:22.23.5-alpine AS builder
 WORKDIR /app
 COPY package*.json tsconfig.node.json ./
 RUN npm ci
@@ -11,7 +11,7 @@ COPY src/bot/health.ts src/bot/
 COPY src/jev ./src/jev
 RUN npm run build:container
 
-FROM node:22.23.4-alpine
+FROM node:22.23.5-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package*.json ./
