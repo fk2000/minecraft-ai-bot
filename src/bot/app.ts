@@ -27,6 +27,11 @@ import { startControlJobPoller } from './control-jobs.js';
 import { parseBotCommand, type BuildTrickId } from './command.js';
 import { listProfileNames, loadMcProfiles, type McProfile } from './profiles.js';
 import { startHealthServer } from './health.js';
+import {
+  canStartReconnect as reconnectGateOpen,
+  createConnectionErrorRouter,
+  installUncaughtExceptionGuard
+} from './connection-errors.js';
 import { parseJevCommand } from './jev-command.js';
 import { parseDifficultyCommand, parseWeatherCommand } from './world-command.js';
 import {
@@ -1451,7 +1456,8 @@ function disconnectMineflayerBot(bot: Bot, reason: unknown, event: 'kicked' | 'e
   bot.removeListener('chat', onChat);
   bot.removeListener('kicked', onKicked);
   bot.removeListener('end', onEnd);
-  bot.removeListener('error', onError);
+  // The error listener stays. About 30s after a keepalive timeout the socket is
+  // destroyed and emits ECONNRESET; removing the listener makes Node exit.
 
   logMinecraftConnectionEvent(event, reason);
   if (!suppressAutoReconnect) {
@@ -1466,7 +1472,6 @@ let activeMinecraftListeners: {
   onChat: (username: string, content: string) => void;
   onKicked: (reason: string, loggedIn: boolean) => void;
   onEnd: (reason: string) => void;
-  onError: (error: Error) => void;
 } | undefined;
 
 function onSpawn(): void {
@@ -1539,21 +1544,45 @@ function onEnd(reason: string): void {
   if (bot) disconnectMineflayerBot(bot, reason, 'end');
 }
 
-function onError(error: Error): void {
-  const bot = activeMinecraftListeners?.bot;
-  if (bot) disconnectMineflayerBot(bot, error, 'error');
-  else logMinecraftConnectionEvent('error', error);
+const connectionErrors = createConnectionErrorRouter<Bot>({
+  isCurrent: (bot) => minecraftBot === bot,
+  canStartReconnect: () => reconnectGateOpen({
+    shuttingDown,
+    suppressAutoReconnect,
+    reconnectPending: reconnectTimer !== undefined,
+    connecting: isConnecting,
+    hasActiveBot: minecraftBot !== undefined,
+    reconnecting: isReconnecting
+  }),
+  onCurrentError: (bot, error) => {
+    disconnectMineflayerBot(bot, error, 'error');
+  },
+  onStaleError: (_bot, error) => {
+    logMinecraftConnectionEvent('stale error', error, false);
+  },
+  onStaleReconnect: (_bot, error) => {
+    scheduleMinecraftReconnect(error);
+  }
+});
+
+function recoverStrayNetworkError(error: unknown): void {
+  const bot = minecraftBot;
+  if (bot && bot.listenerCount('error') === 0) {
+    disconnectMineflayerBot(bot, error, 'error');
+    return;
+  }
+  if (!bot) scheduleMinecraftReconnect(error);
 }
 
 function attachBotListeners(bot: Bot): void {
+  connectionErrors.attach(bot);
   bot.loadPlugin(pathfinder);
-  activeMinecraftListeners = { bot, onSpawn, onPlayerJoined, onChat, onKicked, onEnd, onError };
+  activeMinecraftListeners = { bot, onSpawn, onPlayerJoined, onChat, onKicked, onEnd };
   bot.on('spawn', onSpawn);
   bot.on('playerJoined', onPlayerJoined);
   bot.on('chat', onChat);
   bot.on('kicked', onKicked);
   bot.on('end', onEnd);
-  bot.on('error', onError);
 }
 
 function connect(profile: McProfile = getActiveProfile()): void {
@@ -1630,7 +1659,6 @@ async function teardownBotForSwitch(bot: Bot): Promise<void> {
   bot.removeListener('chat', onChat);
   bot.removeListener('kicked', onKicked);
   bot.removeListener('end', onEnd);
-  bot.removeListener('error', onError);
 }
 
 async function switchServer(name: string): Promise<void> {
@@ -1725,7 +1753,6 @@ function shutdown(signal: NodeJS.Signals): void {
       bot.removeListener('chat', listeners.onChat);
       bot.removeListener('kicked', listeners.onKicked);
       bot.removeListener('end', listeners.onEnd);
-      bot.removeListener('error', listeners.onError);
     }
     minecraftBot = undefined;
     try {
@@ -1745,6 +1772,20 @@ startHealthServer(() => ({
 
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
+
+installUncaughtExceptionGuard({
+  log(error) {
+    console.error('[process] uncaughtException:', error);
+  },
+  recover(error) {
+    console.error('[process] recoverable network error; staying up and routing it to reconnect');
+    recoverStrayNetworkError(error);
+  },
+  exit(code) {
+    console.error('[process] uncaughtException is not a recoverable network error; exiting');
+    process.exit(code);
+  }
+});
 
 void start().catch((error: unknown) => {
   console.error('[startup] Failed to start bot:', error);
