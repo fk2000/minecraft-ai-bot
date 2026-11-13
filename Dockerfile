@@ -2,12 +2,7 @@ FROM node:22.23.4-alpine AS builder
 WORKDIR /app
 COPY package*.json tsconfig.node.json ./
 RUN npm ci
-COPY src/bot/app.ts src/bot/
-COPY src/bot/world-command.ts src/bot/
-COPY src/bot/behavior.ts src/bot/
-COPY src/bot/command.ts src/bot/
-COPY src/bot/jev-command.ts src/bot/
-COPY src/bot/health.ts src/bot/
+COPY src/bot ./src/bot
 COPY src/jev ./src/jev
 RUN npm run build:container
 
